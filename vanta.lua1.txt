@@ -928,22 +928,86 @@ Main:AddToggle("AutoSpam", {Title = "Auto Spam", Default = _G.config.auto_spam o
                                         task.wait(0.1)
                                         waitTime = waitTime + 0.1
                                         ball = Util.get_ball()
-                                    until (ball and ball:IsDescendantOf(workspace) and (ball.Position.Magnitude > 1)) or (waitTime >= 2.5)
+local autoSpamCoroutine = nil
+
+MainTab:AddToggle("AutoSpam", {
+    Title   = "auto spam",
+    Default = _G.config.auto_spam or false,
+    Callback = function(enabled)
+        -- Update the global config directly
+        _G.config.auto_spam = enabled
+        
+        if enabled then
+            -- Clean up old thread if it exists
+            if autoSpamCoroutine then
+                coroutine.resume(autoSpamCoroutine, "stop")
+                autoSpamCoroutine = nil
+            end
+
+            autoSpamCoroutine = coroutine.create(function(signal)
+                while _G.config.auto_spam and (signal ~= "stop") do
+                    local ball = Util.get_ball()
+                    if ball and ball:IsDescendantOf(workspace) then
+                        local zoomies = ball:FindFirstChild("zoomies")
+                        if zoomies then
+                            -- Call your custom function, and safely read the target it defines
+                            Util.closest_player()
+                            local targetPlayer = closestTarget or _G.closestTarget
+
+                            if targetPlayer and targetPlayer.PrimaryPart and targetPlayer:IsDescendantOf(workspace) then
+                                local playerDistance = LocalPlayer:DistanceFromCharacter(ball.Position)
+                                local targetPosition = targetPlayer.PrimaryPart.Position
+                                local targetDistance = LocalPlayer:DistanceFromCharacter(targetPosition)
+
+                                if targetPlayer.Parent then
+                                    if ball.Position.Magnitude >= 1 then
+                                        local ballVelocity = ball.Velocity.Magnitude
+                                        local ballSpeed = math.max(ballVelocity, 0)
+                                        local ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+                                        local pingThreshold = math.clamp(ping / 10, 10, 16)
+                                        local ballProperties = Util:get_ball_properties()
+                                        local entityProperties = Util:players_properties()
+
+                                        local threshold = _G.config.spam_threshold or 3
+                                        local spamAccuracy = Util.perfom_spam({
+                                            Ball_Properties = ballProperties,
+                                            Entity_Properties = entityProperties,
+                                            Ping = pingThreshold,
+                                            Spam_Sensitivity = threshold
+                                        })
+
+                                        -- Safe check for parryCount
+                                        local currentParryCount = parryCount or _G.parryCount or 0
+
+                                        if (zoomies.Parent == ball) and ((playerDistance <= 30) or (targetDistance <= 30)) and (currentParryCount > 1) then
+                                            Util.parry()
+                                        end
+                                    else
+                                        local waitTime = 0
+                                        repeat
+                                            task.wait(0.1)
+                                            waitTime = waitTime + 0.1
+                                            ball = Util.get_ball()
+                                        until (ball and ball:IsDescendantOf(workspace) and (ball.Position.Magnitude > 1)) or (waitTime >= 2.5)
+                                    end
                                 end
                             end
                         end
                     end
+                    task.wait(0.001) -- Rapid polling
                 end
-                task.wait(0.001)
-            end
-        end)
+            end)
 
-        coroutine.resume(autoSpamCoroutine)
-    elseif autoSpamCoroutine then
-        coroutine.resume(autoSpamCoroutine, "stop")
-        autoSpamCoroutine = nil
+            coroutine.resume(autoSpamCoroutine)
+        else
+            if autoSpamCoroutine then
+                coroutine.resume(autoSpamCoroutine, "stop")
+                autoSpamCoroutine = nil
+            end
+        end
     end
-end);
+})
+
 
 
 MainTab:AddSlider("Slider", {
@@ -1337,13 +1401,13 @@ local function calculate_visualizer_radius(ball)
     local zoomies = ball:FindFirstChild("zoomies")
     local velocity = zoomies and zoomies.VectorVelocity.Magnitude or 0
     
-    -- Checks your exact global settings at the top line of your script
-    local isSpammingActive = (_G.manual_spam or (_G.config and _G.config.auto_spam))
+    -- Check if auto_spam or manual_spam is active via your globals
+    local isSpammingActive = _G.config.auto_spam or _G.manual_spam
     return isSpammingActive and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
 end
 
-Visual:AddToggle("VisualizerToggle", {
-    Title   = "Ball Visualizer",
+VisualTab:AddToggle("VisualizerToggle", {
+    Title   = "ball visualizer",
     Default = false,
     Callback = function(state)
         visualizerEnabled = state
@@ -1372,14 +1436,16 @@ game:GetService("RunService").RenderStepped:Connect(function()
     visualizer.Size = Vector3.new(radius, radius, radius)
     visualizer.CFrame = primaryPart.CFrame
     
-    -- Syncs color states with your global script triggers
-    local isSpammingActive = (_G.manual_spam or (_G.config and _G.config.auto_spam))
+    -- Sync color with targeted state and spamming globals
+    local isSpammingActive = _G.config.auto_spam or _G.manual_spam
+    
     if isSpammingActive or isTargetingPlayer then
-        visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger/Active)
+        visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger)
     else
         visualizer.Color = Color3.fromRGB(240, 240, 245) -- Pale White (Safe)
     end
 end)
+
 
 
 
