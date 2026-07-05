@@ -870,8 +870,10 @@ and LocalPlayer.PlayerGui.Hotbar:FindFirstChild("Block") then
         end
     end
 end
-Tabs.Main:AddToggle("AutoSpam", {Title="Auto Spam",Default=true}):OnChanged(function(v)
-    -- Using a global configuration to ensure the loop reads the active state cleanly
+autoSpamCoroutine = nil;
+local targetPlayer = nil;
+
+Main:AddToggle("AutoSpam", {Title = "Auto Spam", Default = false}):OnChanged(function(v)
     _G.AutoSpamValue = v
     
     if v then
@@ -929,12 +931,13 @@ Tabs.Main:AddToggle("AutoSpam", {Title="Auto Spam",Default=true}):OnChanged(func
             end
         end)
 
-                coroutine.resume(autoSpamCoroutine)
+        coroutine.resume(autoSpamCoroutine)
     elseif autoSpamCoroutine then
         coroutine.resume(autoSpamCoroutine, "stop")
         autoSpamCoroutine = nil
     end
 end);
+
 
 MainTab:AddSlider("Slider", {
     Title    = "threshold",
@@ -1324,33 +1327,31 @@ visualizer.Parent = workspace
 visualizer.Size = Vector3.zero
 
 local function calculate_visualizer_radius(ball)
-    -- FIXED: Made sure 'ball' variable capitalization matches the parameter
     local zoomies = ball:FindFirstChild("zoomies")
     local velocity = zoomies and zoomies.VectorVelocity.Magnitude or 0
     return Spamming and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
 end
 
--- UI Toggle for the Visualizer
-MainTab:AddToggle("VisualizerToggle", {
-    Title   = "ball visualizer",
+Visual:AddToggle("VisualizerToggle", {
+    Title   = "Ball Visualizer",
     Default = false,
     Callback = function(state)
         visualizerEnabled = state
         if not state then
-            visualizer.Size = Vector3.zero  -- Hide visualizer instantly when toggled off
+            visualizer.Size = Vector3.zero 
         end
     end
 })
 
-RunService.RenderStepped:Connect(function()
+game:GetService("RunService").RenderStepped:Connect(function()
     if not visualizerEnabled then return end
     
     local char = LocalPlayer.Character
     local primaryPart = char and char.PrimaryPart
-    local ball = Util.get_ball() -- Restored to your original variable 'Util.get_ball'
+    local ball = Util.get_ball()
     
     if not (primaryPart and ball) then
-        visualizer.Size = Vector3.new(0, 0, 0)
+        visualizer.Size = Vector3.zero
         return
     end
     
@@ -1361,13 +1362,13 @@ RunService.RenderStepped:Connect(function()
     visualizer.Size = Vector3.new(radius, radius, radius)
     visualizer.CFrame = primaryPart.CFrame
     
-    -- COLOR TWEAK: Turn Red if spamming/targeted, White/Pale (240, 240, 245) when safe
     if Spamming or isTargetingPlayer then
-        visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger)
+        visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger/Targeted)
     else
         visualizer.Color = Color3.fromRGB(240, 240, 245) -- Pale White (Safe)
     end
 end)
+
 
 -- Korblox and Headless
 
