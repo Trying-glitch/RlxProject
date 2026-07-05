@@ -1311,6 +1311,64 @@ RunService.Heartbeat:Connect(function()
     end
 end)
 
+-- Visualiser
+
+local visualizerEnabled = false
+local visualizer = Instance.new("Part")
+visualizer.Shape = Enum.PartType.Ball
+visualizer.Anchored = true
+visualizer.CanCollide = false
+visualizer.Material = Enum.Material.ForceField
+visualizer.Transparency = 0.5
+visualizer.Parent = workspace
+visualizer.Size = Vector3.zero
+
+local function calculate_visualizer_radius(ball)
+    -- FIXED: Made sure 'ball' variable capitalization matches the parameter
+    local zoomies = ball:FindFirstChild("zoomies")
+    local velocity = zoomies and zoomies.VectorVelocity.Magnitude or 0
+    return Spamming and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
+end
+
+-- UI Toggle for the Visualizer
+MainTab:AddToggle("VisualizerToggle", {
+    Title   = "ball visualizer",
+    Default = false,
+    Callback = function(state)
+        visualizerEnabled = state
+        if not state then
+            visualizer.Size = Vector3.zero  -- Hide visualizer instantly when toggled off
+        end
+    end
+})
+
+RunService.RenderStepped:Connect(function()
+    if not visualizerEnabled then return end
+    
+    local char = LocalPlayer.Character
+    local primaryPart = char and char.PrimaryPart
+    local ball = Util.get_ball() -- Restored to your original variable 'Util.get_ball'
+    
+    if not (primaryPart and ball) then
+        visualizer.Size = Vector3.new(0, 0, 0)
+        return
+    end
+    
+    local target = ball:GetAttribute("target")
+    local isTargetingPlayer = (target == LocalPlayer.Name)
+    local radius = calculate_visualizer_radius(ball)
+    
+    visualizer.Size = Vector3.new(radius, radius, radius)
+    visualizer.CFrame = primaryPart.CFrame
+    
+    -- COLOR TWEAK: Turn Red if spamming/targeted, White/Pale (240, 240, 245) when safe
+    if Spamming or isTargetingPlayer then
+        visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger)
+    else
+        visualizer.Color = Color3.fromRGB(240, 240, 245) -- Pale White (Safe)
+    end
+end)
+
 -- Korblox and Headless
 
 local Players = game:GetService("Players")
