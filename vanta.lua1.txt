@@ -1435,56 +1435,65 @@ end)
 local visualizerEnabled = false
 local visualizer = Instance.new("Part")
 visualizer.Shape = Enum.PartType.Ball
+visualizer.Properties = nil -- (Clean slate)
 visualizer.Anchored = true
 visualizer.CanCollide = false
 visualizer.Material = Enum.Material.ForceField
-visualizer.Transparency = 0.5
+visualizer.Transparency = 0.5 -- Locked at half opacity
 visualizer.Parent = workspace
 visualizer.Size = Vector3.zero
+
 local function calculate_visualizer_radius(ball)
-	local zoomies = ball:FindFirstChild("zoomies")
-	local velocity = zoomies and zoomies.VectorVelocity.Magnitude or 0
+    local zoomies = ball:FindFirstChild("zoomies")
+    -- Fixed: Uses .Magnitude to get the speed number, and falls back to base velocity if zoomies is missing
+    local velocity = zoomies and zoomies.VectorVelocity.Magnitude or ball.AssemblyLinearVelocity.Magnitude
+    local isSpamming = (_G.config.auto_spam or _G.manual_spam)
     
-    -- Check if auto_spam or manual_spam is active via your globals
-	local isSpammingActive = _G.config.auto_spam or _G.manual_spam
-	return isSpammingActive and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
+    return isSpamming and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
 end
-VisualTab:AddToggle("VisualizerToggle", {
-	Title = "ball visualizer",
-	Default = false,
-	Callback = function(state)
-		visualizerEnabled = state
-		if not state then
-			visualizer.Size = Vector3.zero
-		end
-	end
-})
-game:GetService("RunService").RenderStepped:Connect(function()
-	if not visualizerEnabled then
-		return
-	end
-	local char = LocalPlayer.Character
-	local primaryPart = char and char.PrimaryPart
-	local ball = Util.get_ball()
-	if not (primaryPart and ball) then
-		visualizer.Size = Vector3.zero
-		return
-	end
-	local target = ball:GetAttribute("target")
-	local isTargetingPlayer = (target == LocalPlayer.Name)
-	local radius = calculate_visualizer_radius(ball)
-	visualizer.Size = Vector3.new(radius, radius, radius)
-	visualizer.CFrame = primaryPart.CFrame
+
+local function toggle_visualizer(state)
+    visualizerEnabled = state
+    if not state then
+        visualizer.Size = Vector3.zero  -- Hide visualizer instantly
+    end
+end
+
+RunService.RenderStepped:Connect(function()
+    if not visualizerEnabled then return end
     
-    -- Sync color with targeted state and spamming globals
-	local isSpammingActive = _G.config.auto_spam or _G.manual_spam
-	if isSpammingActive or isTargetingPlayer then
-		visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger)
-	else
-		visualizer.Color = Color3.fromRGB(240, 240, 245) -- Pale White (Safe)
-	end
+    local char = LocalPlayer.Character
+    local primaryPart = char and char.PrimaryPart
+    local ball = Util.get_ball() -- Fixed: Changed from Auto_Parry to your actual script's function
+    
+    if not (primaryPart and ball) then
+        visualizer.Size = Vector3.zero
+        return
+    end
+    
+    local target = ball:GetAttribute("target")
+    local isTargetingPlayer = (target == LocalPlayer.Name)
+    local radius = calculate_visualizer_radius(ball)
+    
+    visualizer.Size = Vector3.new(radius, radius, radius)
+    visualizer.CFrame = primaryPart.CFrame
+    
+    local isSpamming = (_G.config.auto_spam or _G.manual_spam)
+    
+    -- Fixed: Changes color to RED if spamming or targeted, changes to White if you are safe
+    if isSpamming or isTargetingPlayer then
+        visualizer.Color = Color3.fromRGB(255, 0, 50)  -- Red
+    else
+        visualizer.Color = Color3.fromRGB(240, 240, 245)  -- Pale White (Safe)
+    end
 end)
 
+
+VisualTab:AddToggle("VisualizerToggle", {
+    Title    = "Ball Visualizer",
+    Default  = false,
+    Callback = toggle_visualizer -- Runs your function automatically when clicked
+})
 
 
 
