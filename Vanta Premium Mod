@@ -757,8 +757,8 @@ local curveMethodDropdown = MainTab:AddDropdown("DropdownAPCurve", {
 
 local CurveHotkeys = {
     [Enum.KeyCode.One]   = "camera",
-      = "dot",
-    = "backwards",
+       "dot",
+     "backwards",
     [Enum.KeyCode.Four]  = "slow",
     [Enum.KeyCode.Five]  = "random",
 }
