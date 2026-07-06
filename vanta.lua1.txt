@@ -985,6 +985,59 @@ MainTab:AddToggle("AutoSpam", {
                                     else
                                         local waitTime = 0
                                         repeat
+local autoSpamCoroutine = nil
+
+MainTab:AddToggle("AutoSpam", {
+    Title   = "auto spam",
+    Default = _G.config.auto_spam or false,
+    Callback = function(enabled)
+        _G.config.auto_spam = enabled
+        
+        if enabled then
+            if autoSpamCoroutine then
+                coroutine.resume(autoSpamCoroutine, "stop")
+                autoSpamCoroutine = nil
+            end
+
+            autoSpamCoroutine = coroutine.create(function(signal)
+                while _G.config.auto_spam and (signal ~= "stop") do
+                    local ball = Util.get_ball()
+                    if ball and ball:IsDescendantOf(workspace) then
+                        local zoomies = ball:FindFirstChild("zoomies")
+                        if zoomies then
+                            Util.closest_player()
+                            local targetPlayer = closestTarget or _G.closestTarget
+
+                            if targetPlayer and targetPlayer.PrimaryPart and targetPlayer:IsDescendantOf(workspace) then
+                                local playerDistance = LocalPlayer:DistanceFromCharacter(ball.Position)
+                                local targetPosition = targetPlayer.PrimaryPart.Position
+                                local targetDistance = LocalPlayer:DistanceFromCharacter(targetPosition)
+
+                                if targetPlayer.Parent then
+                                    if ball.Position.Magnitude >= 1 then
+                                        local ballVelocity = ball.Velocity.Magnitude
+                                        local ballSpeed = math.max(ballVelocity, 0)
+                                        local ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+                                        local pingThreshold = math.clamp(ping / 10, 10, 16)
+                                        local ballProperties = Util:get_ball_properties()
+                                        local entityProperties = Util:players_properties()
+
+                                        local threshold = _G.config.spam_threshold or 3
+                                        local spamAccuracy = Util.perfom_spam({
+                                            Ball_Properties = ballProperties,
+                                            Entity_Properties = entityProperties,
+                                            Ping = pingThreshold,
+                                            Spam_Sensitivity = threshold
+                                        })
+
+                                        local currentParryCount = parryCount or _G.parryCount or 0
+
+                                        if (zoomies.Parent == ball) and ((playerDistance <= 30) or (targetDistance <= 30)) and (currentParryCount > 1) then
+                                            Util.parry()
+                                        end
+                                    else
+                                        local waitTime = 0
+                                        repeat
                                             task.wait(0.1)
                                             waitTime = waitTime + 0.1
                                             ball = Util.get_ball()
@@ -994,7 +1047,7 @@ MainTab:AddToggle("AutoSpam", {
                             end
                         end
                     end
-                    task.wait(0.001) -- Rapid polling
+                    task.wait(0.001)
                 end
             end)
 
