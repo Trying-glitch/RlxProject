@@ -1432,39 +1432,50 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- Visualiser
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local RunService = game:GetService("RunService")
+
 local visualizerEnabled = false
 local visualizer = Instance.new("Part")
 visualizer.Shape = Enum.PartType.Ball
-visualizer.Properties = nil -- (Clean slate)
 visualizer.Anchored = true
 visualizer.CanCollide = false
 visualizer.Material = Enum.Material.ForceField
-visualizer.Transparency = 0.5 -- Locked at half opacity
+visualizer.Transparency = 0.5 -- Half opacity
 visualizer.Parent = workspace
 visualizer.Size = Vector3.zero
 
 local function calculate_visualizer_radius(ball)
     local zoomies = ball:FindFirstChild("zoomies")
-    -- Fixed: Uses .Magnitude to get the speed number, and falls back to base velocity if zoomies is missing
+    -- Fallback to AssemblyLinearVelocity if zoomies doesn't exist yet
     local velocity = zoomies and zoomies.VectorVelocity.Magnitude or ball.AssemblyLinearVelocity.Magnitude
-    local isSpamming = (_G.config.auto_spam or _G.manual_spam)
     
-    return isSpamming and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
+    local isSpammingActive = _G.config.auto_spam or _G.manual_spam
+    return isSpammingActive and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
 end
 
-local function toggle_visualizer(state)
-    visualizerEnabled = state
-    if not state then
-        visualizer.Size = Vector3.zero  -- Hide visualizer instantly
+-- Your UI Toggle Setup
+VisualTab:AddToggle("VisualizerToggle", {
+    Title = "ball visualizer",
+    Default = false,
+    Callback = function(state)
+        visualizerEnabled = state
+        if not state then
+            visualizer.Size = Vector3.zero -- Instantly hide when toggled off
+        end
     end
-end
+})
 
+-- The Core Loop
 RunService.RenderStepped:Connect(function()
-    if not visualizerEnabled then return end
+    if not visualizerEnabled then
+        return
+    end
     
     local char = LocalPlayer.Character
     local primaryPart = char and char.PrimaryPart
-    local ball = Util.get_ball() -- Fixed: Changed from Auto_Parry to your actual script's function
+    local ball = Util.get_ball() -- Uses your script's native ball tracker
     
     if not (primaryPart and ball) then
         visualizer.Size = Vector3.zero
@@ -1475,27 +1486,18 @@ RunService.RenderStepped:Connect(function()
     local isTargetingPlayer = (target == LocalPlayer.Name)
     local radius = calculate_visualizer_radius(ball)
     
+    -- Update Size and Position (centered on you)
     visualizer.Size = Vector3.new(radius, radius, radius)
     visualizer.CFrame = primaryPart.CFrame
     
-    local isSpamming = (_G.config.auto_spam or _G.manual_spam)
-    
-    -- Fixed: Changes color to RED if spamming or targeted, changes to White if you are safe
-    if isSpamming or isTargetingPlayer then
-        visualizer.Color = Color3.fromRGB(255, 0, 50)  -- Red
+    -- Handle Colors dynamically
+    local isSpammingActive = _G.config.auto_spam or _G.manual_spam
+    if isSpammingActive or isTargetingPlayer then
+        visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger)
     else
-        visualizer.Color = Color3.fromRGB(240, 240, 245)  -- Pale White (Safe)
+        visualizer.Color = Color3.fromRGB(240, 240, 245) -- Pale White (Safe)
     end
 end)
-
-
-VisualTab:AddToggle("VisualizerToggle", {
-    Title    = "Ball Visualizer",
-    Default  = false,
-    Callback = toggle_visualizer -- Runs your function automatically when clicked
-})
-
-
 
 -- Korblox and Headless
 local Players = game:GetService("Players")
