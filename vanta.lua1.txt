@@ -1432,53 +1432,94 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- Visualiser
-local Players = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
-local RunService = game:GetService("RunService")
-
 local visualizerEnabled = false
-local visualizer = Instance.new("Part")
-visualizer.Shape = Enum.PartType.Ball
-visualizer.Anchored = true
-visualizer.CanCollide = false
-visualizer.Material = Enum.Material.ForceField
-visualizer.Transparency = 0.5 -- Half opacity
-visualizer.Parent = workspace
-visualizer.Size = Vector3.zero
+local visualizerPart = nil
 
-local function calculate_visualizer_radius(ball)
-    local zoomies = ball:FindFirstChild("zoomies")
-    -- Fallback to AssemblyLinearVelocity if zoomies doesn't exist yet
-    local velocity = zoomies and zoomies.VectorVelocity.Magnitude or ball.AssemblyLinearVelocity.Magnitude
-    
-    local isSpammingActive = _G.config.auto_spam or _G.manual_spam
-    return isSpammingActive and 25 or math.clamp((velocity / 2.4) + 10, 15, 200)
+local function isSpamModeActive()
+    return _G.AutoSpamValue or _G.manual_spam or false
 end
 
--- Your UI Toggle Setup
+local function calculate_visualizer_radius(ball)
+    if not ball then return 0 end
+    local zoomies = ball:FindFirstChild("zoomies")
+    if not zoomies then return 0 end
+    
+    local velocity = zoomies.VectorVelocity
+    local speed = velocity.Magnitude
+    
+    -- Dynamically mirror auto-parry activation calculations
+    local pingValue = Stats.Network.ServerStatsItem:GetValue()
+    local pingClamp = math.clamp((pingValue / 10) / 10, 5, 17)
+    local speedAdjust = math.min(math.max(speed - 9.5, 0), 650)
+    
+    local timingBase = 2.4 + speedAdjust * 0.002
+    local timingScale = accuracyMultiplier
+    local timingFinal = timingBase * timingScale
+    local parryDistance = pingClamp + math.max(speed / timingFinal, 9.5)
+    
+    -- Fallback to constant execution radius during active target clash
+    if isSpamModeActive() then
+        return 25
+    end
+    
+    return parryDistance
+end
+
+local function createVisualizerPart()
+    if visualizerPart and visualizerPart.Parent then
+        pcall(function() visualizerPart:Destroy() end)
+    end
+    
+    visualizerPart = Instance.new("Part")
+    visualizerPart.Name = "ParryVisualizerSphere"
+    visualizerPart.Shape = Enum.PartType.Ball
+    visualizerPart.Anchored = true
+    visualizerPart.CanCollide = false
+    visualizerPart.CanTouch = false
+    visualizerPart.CanQuery = false
+    visualizerPart.CastShadow = false
+    visualizerPart.Material = Enum.Material.ForceField
+    visualizerPart.Transparency = 0.8
+    visualizerPart.Color = Color3.fromRGB(240, 240, 245)
+    
+    -- Attach to local viewport container to protect from cleanup routines
+    visualizerPart.Parent = workspace.CurrentCamera
+end
+
 VisualTab:AddToggle("VisualizerToggle", {
-    Title = "ball visualizer",
+    Title   = "ball visualizer",
     Default = false,
     Callback = function(state)
         visualizerEnabled = state
         if not state then
-            visualizer.Size = Vector3.zero -- Instantly hide when toggled off
+            if visualizerPart then
+                visualizerPart.Size = Vector3.zero
+            end
+        else
+            createVisualizerPart()
         end
     end
 })
 
--- The Core Loop
 RunService.RenderStepped:Connect(function()
-    if not visualizerEnabled then
-        return
+    if not visualizerEnabled then 
+        if visualizerPart and visualizerPart.Size ~= Vector3.zero then
+            visualizerPart.Size = Vector3.zero
+        end
+        return 
+    end
+    
+    -- Instantiate replacement if reference is swept
+    if not visualizerPart or not visualizerPart.Parent or visualizerPart.Parent ~= workspace.CurrentCamera then
+        createVisualizerPart()
     end
     
     local char = LocalPlayer.Character
     local primaryPart = char and char.PrimaryPart
-    local ball = Util.get_ball() -- Uses your script's native ball tracker
+    local ball = Util.get_ball()
     
     if not (primaryPart and ball) then
-        visualizer.Size = Vector3.zero
+        visualizerPart.Size = Vector3.zero
         return
     end
     
@@ -1486,16 +1527,18 @@ RunService.RenderStepped:Connect(function()
     local isTargetingPlayer = (target == LocalPlayer.Name)
     local radius = calculate_visualizer_radius(ball)
     
-    -- Update Size and Position (centered on you)
-    visualizer.Size = Vector3.new(radius, radius, radius)
-    visualizer.CFrame = primaryPart.CFrame
+    -- Correct for standard diameter scaling properties
+    local diameter = radius * 2
+    visualizerPart.Size = Vector3.new(diameter, diameter, diameter)
+    visualizerPart.CFrame = primaryPart.CFrame
     
-    -- Handle Colors dynamically
-    local isSpammingActive = _G.config.auto_spam or _G.manual_spam
-    if isSpammingActive or isTargetingPlayer then
-        visualizer.Color = Color3.fromRGB(255, 0, 0) -- Red (Danger)
+    -- Dynamically update sphere color based on real-time threat levels
+    if isSpamModeActive() or isTargetingPlayer then
+        visualizerPart.Color = Color3.fromRGB(255, 0, 0)
+        visualizerPart.Transparency = 0.65
     else
-        visualizer.Color = Color3.fromRGB(240, 240, 245) -- Pale White (Safe)
+        visualizerPart.Color = Color3.fromRGB(240, 240, 245)
+        visualizerPart.Transparency = 0.85
     end
 end)
 
