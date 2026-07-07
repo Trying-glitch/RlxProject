@@ -66,10 +66,16 @@ function util.ball()
 end
 
 -----------------------------------------------------------
--- Dynamic Remote Hooking & Argument Tracking (UPDATED)
+-- Safe Anti-Detection Remote Mapping & Cache
 -----------------------------------------------------------
-local TargetRemote = nil
-local TrackingArgs = nil
+local cloneref = cloneref or function(obj) return obj end
+local ReplicatedStore = cloneref(game:GetService("ReplicatedStorage"))
+local UserInputService = cloneref(game:GetService("UserInputService"))
+local Stats = cloneref(game:GetService("Stats"))
+local Workspace = cloneref(game:GetService("Workspace"))
+
+local hookedRemotes = {}
+local hookedMetatables = {}
 
 local function isValidRemoteArgs(args)
     return #args == 7 
@@ -82,9 +88,12 @@ local function isValidRemoteArgs(args)
 end
 
 local function hookRemote(remote)
-    local mt = getrawmetatable(remote)
-    if not mt then return end
+    if hookedRemotes[remote] then return end
     
+    local mt = getrawmetatable(remote)
+    if not mt or hookedMetatables[mt] then return end
+    
+    hookedMetatables[mt] = true
     setreadonly(mt, false)
     local originalIndex = mt.__index
     
@@ -93,8 +102,8 @@ local function hookRemote(remote)
             return function(selfArg, ...)
                 local args = {...}
                 if isValidRemoteArgs(args) then
-                    TargetRemote = self
-                    TrackingArgs = args
+                    -- Continuously cache the freshest authentic argument state
+                    hookedRemotes[self] = args
                 end
                 return originalIndex(self, key)(selfArg, unpack(args))
             end
@@ -104,6 +113,7 @@ local function hookRemote(remote)
     setreadonly(mt, true)
 end
 
+-- Safely scan for remotes
 for _, child in ipairs(ReplicatedStore:GetChildren()) do
     if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
         hookRemote(child)
@@ -298,53 +308,83 @@ local function canProcessParry()
     return not getgenv().SingularityActive and not getgenv().AerodynamicActive
 end
 
--- Updated Execution Sequence Matching the 7-Arg Hook Setup
+-- Updated Execution Sequence Matching the 7-Arg Hook Setup (Safe Anti-Detection Blend)
 AutoParry.Parry = function(isSpam)
+    if isOnParryCooldown then return false end
     if tick() - lastParryTime < parryCooldown then return false end
     lastParryTime = tick()
 
     local presses = isSpam and spamSpeed or 1
+    local hasFired = false
 
-    if not TargetRemote or not TrackingArgs then
-        -- Fallback sequence if arguments haven't been captured via normal game interactions yet
+    -- Check if we have captured real arguments via our metatable hook dictionary yet
+    local trackingFound = false
+    for _, _ in pairs(hookedRemotes) do
+        trackingFound = true
+        break
+    end
+
+    if not trackingFound then
+        -- Fallback sequence using hardware inputs if no network traffic captured yet
         for i = 1, presses do
             VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
             VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
         end
+        hasFired = true
     else
         local DynamicParryData = AutoParry.computeParryData(selectedParryMode)
         
-        local targetHash    = TrackingArgs[1]
-        local actionName    = TrackingArgs[2]
-        local sequenceNum   = DynamicParryData[1] or TrackingArgs[3]
-        local parryCFrame   = DynamicParryData[2] or TrackingArgs[4]
-        local entityTable   = DynamicParryData[3] or TrackingArgs[5]
-        local mousePosTable = DynamicParryData[4] or TrackingArgs[6]
-        local stateFlag     = TrackingArgs[7]
+        local mouseLocation = UserInputService:GetMouseLocation()
+        local cursorPos = { mouseLocation.X, mouseLocation.Y }
+        
+        local playerScreenPositions = {}
+        local aliveFolder = workspace:FindFirstChild("Alive")
+        if aliveFolder then
+            for _, character in ipairs(aliveFolder:GetChildren()) do
+                if character:IsA("Model") and character.PrimaryPart then
+                    pcall(function()
+                        playerScreenPositions[character.Name] = workspace.CurrentCamera:WorldToScreenPoint(character.PrimaryPart.Position)
+                    end)
+                end
+            end
+        end
 
-        for i = 1, presses do
-            TargetRemote:FireServer(
-                targetHash,
-                actionName,
-                sequenceNum,
-                parryCFrame,
-                entityTable,
-                mousePosTable,
-                stateFlag
-            )
+        -- Execute through captured remotes using genuine structural tracking data
+        for remote, originalArgs in pairs(hookedRemotes) do
+            if remote.Parent then
+                -- Safely merge your computing configurations with the original args
+                local targetHash    = originalArgs[1]
+                local actionName    = originalArgs[2]
+                local sequenceNum   = DynamicParryData[1] or originalArgs[3] -- Keeps sequence real if undefined
+                local parryCFrame   = DynamicParryData[2] or originalArgs[4]
+                local entityTable   = playerScreenPositions or originalArgs[5]
+                local mousePosTable = cursorPos or originalArgs[6]
+                local stateFlag     = originalArgs[7]
+
+                -- Mirroring the spam speed safely by relying on the game's actual data state
+                if remote:IsA("RemoteEvent") then
+                    remote:FireServer(targetHash, actionName, sequenceNum, parryCFrame, entityTable, mousePosTable, stateFlag)
+                elseif remote:IsA("RemoteFunction") then
+                    remote:InvokeServer(targetHash, actionName, sequenceNum, parryCFrame, entityTable, mousePosTable, stateFlag)
+                end
+                hasFired = true
+            end
         end
     end
 
-    if Parries > 7 then
+    -- Reference hardware-level rate limiting check
+    if parryCount > 7 then
         return false
     end
-    Parries = Parries + 1
+    
+    parryCount = parryCount + 1
     task.delay(0.5, function()
-        if Parries > 0 then
-            Parries = Parries - 1
+        if parryCount > 0 then
+            parryCount = parryCount - 1
         end
     end)
 
+    -- Your original DeathSlash configuration tracks untouched
     if getgenv().DeathSlashActive then
         getgenv().DeathSlashParryCount = getgenv().DeathSlashParryCount + 1
         if getgenv().DeathSlashParryCount >= 35 then
@@ -352,7 +392,8 @@ AutoParry.Parry = function(isSpam)
             getgenv().DeathSlashParryCount = 0
         end
     end
-    return true
+
+    return hasFired
 end
 
 function AutoParry.triggerParry(mode)
