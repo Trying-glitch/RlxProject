@@ -17,8 +17,6 @@ local AliveGroup       = Workspace:FindFirstChild("Alive")
 local lastInputType    = UserInputService:GetLastInputType()
 local currentMousePos  = nil
 local parryAnimation   = nil
-local Remotes          = {}
-local Parry_Key        = nil
 
 -- Global flags
 getgenv().SingularityActive = false
@@ -43,7 +41,6 @@ local Spamming = false
 local Closest_Entity = nil
 local ServerStatsItem = Stats.Network.ServerStatsItem
 local Alive = Workspace.Alive
-local activeMethod = "Remote"
 
 -- Manual Spam
 local manualSpamEnabled = false
@@ -51,29 +48,71 @@ local spamming = false
 local spamRate = 0.005
 
 -----------------------------------------------------------
--- Remote Lookup
+-- Central Utility Module
 -----------------------------------------------------------
-task.spawn(function()
-    for _, Value in getgc() do
-        if type(Value) == 'function' and islclosure(Value) then
-            local Protos = debug.getprotos(Value)
-            local Upvalues = debug.getupvalues(Value)
-            local Constants = debug.getconstants(Value)
-            if #Protos == 4 and #Upvalues == 24 and #Constants >= 102 then
-                local c62 = Constants[62]
-                local c64 = Constants[64]
-                local c65 = Constants[65]
-                Remotes[debug.getupvalue(Value, 16)] = c62
-                Parry_Key = debug.getupvalue(Value, 17)
-                Remotes[debug.getupvalue(Value, 18)] = c64
-                Remotes[debug.getupvalue(Value, 19)] = c65
-                break
+local util = {}
+
+function util.ball()
+    local ballCont = Workspace:FindFirstChild("Balls")
+    if ballCont then
+        for _, b in ipairs(ballCont:GetChildren()) do
+            if b:GetAttribute("realBall") or (not b.Anchored and b:FindFirstChild("zoomies")) then
+                b.CanCollide = false
+                return b
             end
         end
     end
-    if not Parry_Key or next(Remotes) == nil then
-        warn("[Key Finder] Failed to find remotes or parry key. Falling back to Keypress method.")
-        activeMethod = "F Key"
+    return nil
+end
+
+-----------------------------------------------------------
+-- Dynamic Remote Hooking & Argument Tracking (UPDATED)
+-----------------------------------------------------------
+local TargetRemote = nil
+local TrackingArgs = nil
+
+local function isValidRemoteArgs(args)
+    return #args == 7 
+        and type(args[2]) == "string" 
+        and type(args[3]) == "number" 
+        and typeof(args[4]) == "CFrame" 
+        and type(args[5]) == "table" 
+        and type(args[6]) == "table" 
+        and type(args[7]) == "boolean"
+end
+
+local function hookRemote(remote)
+    local mt = getrawmetatable(remote)
+    if not mt then return end
+    
+    setreadonly(mt, false)
+    local originalIndex = mt.__index
+    
+    mt.__index = function(self, key)
+        if (key == "FireServer" and self:IsA("RemoteEvent")) or (key == "InvokeServer" and self:IsA("RemoteFunction")) then
+            return function(selfArg, ...)
+                local args = {...}
+                if isValidRemoteArgs(args) then
+                    TargetRemote = self
+                    TrackingArgs = args
+                end
+                return originalIndex(self, key)(selfArg, unpack(args))
+            end
+        end
+        return originalIndex(self, key)
+    end
+    setreadonly(mt, true)
+end
+
+for _, child in ipairs(ReplicatedStore:GetChildren()) do
+    if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+        hookRemote(child)
+    end
+end
+
+ReplicatedStore.ChildAdded:Connect(function(child)
+    if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
+        hookRemote(child)
     end
 end)
 
@@ -135,7 +174,7 @@ function Spam.Entity_Properties()
 end
 
 function Spam.Ball_Properties()
-    local Ball = Spam.FetchBall()
+    local Ball = util.ball()
     if not Ball then
         return {Velocity=Vector3.zero, Direction=Vector3.zero, Distance=math.huge, Dot=0}
     end
@@ -147,7 +186,7 @@ function Spam.Ball_Properties()
 end
 
 function Spam.CalcAccuracy(params)
-    local ball = Spam.FetchBall()
+    local ball = util.ball()
     if not ball then return 0 end
     Spam.Get_Closest()
     local accuracy = 0
@@ -166,15 +205,6 @@ function Spam.CalcAccuracy(params)
     local adjDot = math.clamp(dot, -1, 1) * maxSpeed
     accuracy = maxSpamRange - adjDot
     return accuracy
-end
-
-function Spam.FetchBall()
-    for _, b in pairs(Workspace.Balls:GetChildren()) do
-        if b:GetAttribute("realBall") then
-            b.CanCollide = false
-            return b
-        end
-    end
 end
 
 -----------------------------------------------------------
@@ -209,21 +239,6 @@ function AutoParry.playParryAnimation()
     parryAnimation:Play()
 end
 
-function AutoParry.fetchBalls()
-    local balls = {}
-    for _, b in pairs(Workspace.Balls:GetChildren()) do
-        if b:GetAttribute("realBall") then
-            b.CanCollide = false
-            table.insert(balls, b)
-        end
-    end
-    return balls
-end
-
-function AutoParry.Get_Ball()
-    return Spam.FetchBall() -- Map to Spam.FetchBall
-end
-
 function AutoParry.computeParryData(mode)
     local eventTable = {}
     local cam = Workspace.CurrentCamera
@@ -256,7 +271,7 @@ function AutoParry.computeParryData(mode)
     elseif mode == "Left" then
         return { 0, CFrame.new(camPos, camPos - (cam.CFrame.RightVector * 1000)), eventTable, currentMousePos }
     elseif mode == "Dot" then
-        local ball = AutoParry.Get_Ball()
+        local ball = util.ball()
         if ball then
             return { 0, CFrame.new(camPos, ball.Position), eventTable, currentMousePos }
         else
@@ -283,36 +298,40 @@ local function canProcessParry()
     return not getgenv().SingularityActive and not getgenv().AerodynamicActive
 end
 
+-- Updated Execution Sequence Matching the 7-Arg Hook Setup
 AutoParry.Parry = function(isSpam)
     if tick() - lastParryTime < parryCooldown then return false end
     lastParryTime = tick()
 
     local presses = isSpam and spamSpeed or 1
 
-    if activeMethod == "F Key" then
+    if not TargetRemote or not TrackingArgs then
+        -- Fallback sequence if arguments haven't been captured via normal game interactions yet
         for i = 1, presses do
             VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
             VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
         end
     else
-        local foundFake = false
-        for _, Args in pairs(Remotes) do
-            if Args == "PARRY_HASH_FAKE_1" or Args == "_G" then
-                foundFake = true
-                break
-            end
-        end
-        local Parry_Data = AutoParry.computeParryData(selectedParryMode)
+        local DynamicParryData = AutoParry.computeParryData(selectedParryMode)
+        
+        local targetHash    = TrackingArgs[1]
+        local actionName    = TrackingArgs[2]
+        local sequenceNum   = DynamicParryData[1] or TrackingArgs[3]
+        local parryCFrame   = DynamicParryData[2] or TrackingArgs[4]
+        local entityTable   = DynamicParryData[3] or TrackingArgs[5]
+        local mousePosTable = DynamicParryData[4] or TrackingArgs[6]
+        local stateFlag     = TrackingArgs[7]
+
         for i = 1, presses do
-            for Remote, Args in pairs(Remotes) do
-                local Hash
-                if foundFake then
-                    Hash = nil
-                else
-                    Hash = Args
-                end
-                Remote:FireServer(Hash, Parry_Key, Parry_Data[1], Parry_Data[2], Parry_Data[3], Parry_Data[4])
-            end
+            TargetRemote:FireServer(
+                targetHash,
+                actionName,
+                sequenceNum,
+                parryCFrame,
+                entityTable,
+                mousePosTable,
+                stateFlag
+            )
         end
     end
 
@@ -331,7 +350,6 @@ AutoParry.Parry = function(isSpam)
         if getgenv().DeathSlashParryCount >= 35 then
             getgenv().DeathSlashActive = false
             getgenv().DeathSlashParryCount = 0
-            stopDeathSlashSpam()
         end
     end
     return true
@@ -343,14 +361,12 @@ function AutoParry.triggerParry(mode)
     AutoParry.Parry(false)
 end
 
--- Linear Interpolation Helper
 local function lerp(a, b, t)
     return a + (b - a) * t
 end
 
--- Anti-Curve Detection
 function AutoParry.detectCurve()
-    local ball = AutoParry.Get_Ball()
+    local ball = util.ball()
     if not ball or not LocalPlayer.Character or not LocalPlayer.Character.PrimaryPart then return false end
     local zoom = ball:FindFirstChild("zoomies")
     if not zoom then return false end
@@ -509,29 +525,17 @@ end
 -- VISUALIZER SETUP
 -----------------------------------------------------------
 local visualEnabled = false
-local visColor = Color3.fromRGB(255, 0, 0) -- Default, no color picker
-local function getCharacter()
-    return LocalPlayer and LocalPlayer.Character
-end
+local visColor = Color3.fromRGB(255, 0, 0)
+local function getCharacter() return LocalPlayer and LocalPlayer.Character end
 local function getPrimaryPart()
     local c = getCharacter()
     return c and c.PrimaryPart
 end
-local function getActiveBall()
-    local ballCont = Workspace:FindFirstChild("Balls")
-    if ballCont then
-        for _, b in ipairs(ballCont:GetChildren()) do
-            if not b.Anchored then 
-                return b 
-            end
-        end
-    end
-    return nil
-end
 local function computeVisualizerRadius()
-    local b = getActiveBall()
+    local b = util.ball()
     if b then
-        local v = b.Velocity.Magnitude
+        local zoom = b:FindFirstChild("zoomies")
+        local v = zoom and zoom.VectorVelocity.Magnitude or b.AssemblyLinearVelocity.Magnitude
         return math.clamp(v / 2.4 + 10, 15, 200)
     end
     return 15
@@ -547,15 +551,13 @@ visPart.Parent = Workspace
 visPart.Size = Vector3.new(0, 0, 0)
 local function toggleVisualizer(state)
     visualEnabled = state
-    if not state then 
-        visPart.Size = Vector3.new(0, 0, 0)
-    end
+    if not state then visPart.Size = Vector3.new(0, 0, 0) end
 end
 
 RunService.RenderStepped:Connect(function()
     if not visualEnabled then return end
     local prim = getPrimaryPart()
-    local b = getActiveBall()
+    local b = util.ball()
     if prim and b then
         local rad = computeVisualizerRadius()
         visPart.Size = Vector3.new(rad, rad, rad)
@@ -567,7 +569,7 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -----------------------------------------------------------
--- MANUAL SPAM SETUP
+-- MANUAL SPAM UI
 -----------------------------------------------------------
 local screenGui = Instance.new("ScreenGui", CoreGui)
 screenGui.Name = "SimpleSpamUI"
@@ -585,7 +587,7 @@ local byLennyLabel = Instance.new("TextLabel", container)
 byLennyLabel.Size = UDim2.new(0, 100, 0, 30)
 byLennyLabel.Position = UDim2.new(0.5, -50, 0, 0)
 byLennyLabel.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-byLennyLabel.Text = "ðŸŽ­ by Lenny"
+byLennyLabel.Text = "🎭 by Lenny"
 byLennyLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 byLennyLabel.Font = Enum.Font.Gotham
 byLennyLabel.TextSize = 14
@@ -630,271 +632,66 @@ end)
 
 RunService.Heartbeat:Connect(function()
     if spamming and manualSpamEnabled then
-        if tick() - lastParryTime < parryCooldown then return end
-        lastParryTime = tick()
-
-        if activeMethod == "F Key" then
-            VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
-            VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
-        else
-            local foundFake = false
-            for _, Args in pairs(Remotes) do
-                if Args == "PARRY_HASH_FAKE_1" or Args == "_G" then
-                    foundFake = true
-                    break
-                end
-            end
-            local Parry_Data = AutoParry.computeParryData(selectedParryMode)
-            for Remote, Args in pairs(Remotes) do
-                local Hash
-                if foundFake then
-                    Hash = nil
-                else
-                    Hash = Args
-                end
-                Remote:FireServer(Hash, Parry_Key, Parry_Data[1], Parry_Data[2], Parry_Data[3], Parry_Data[4])
-            end
-        end
-
+        AutoParry.Parry(true)
         task.wait(spamRate)
     end
 end)
 
 -----------------------------------------------------------
--- AI PLAY SETUP
------------------------------------------------------------
-local AIPlaying = false
-local AICoroutine = nil
-local AITarget = nil
-local AICurrentMethod = "Legit"
-local AIStuckCheck = {
-    lastPosition = Vector3.new(),
-    stuckDuration = 0
-}
-local AICooldowns = {
-    jump = 0,
-    dash = 0,
-    targetSwitch = 0,
-    action = 0
-}
-
-local function getValidPlayers()
-    local players = {}
-    local myPosition = LocalPlayer.Character and (LocalPlayer.Character:FindFirstChild("HumanoidRootPart") or LocalPlayer.Character.PrimaryPart).Position
-    for _, player in ipairs(Players:GetPlayers()) do
-        if (player ~= LocalPlayer) and player.Character then
-            local primaryPart = player.Character:FindFirstChild("HumanoidRootPart") or player.Character.PrimaryPart
-            if primaryPart and primaryPart.Position then
-                if myPosition then
-                    local direction = (primaryPart.Position - myPosition).Unit
-                    local viewVector = LocalPlayer.Character:GetPrimaryPartCFrame().LookVector.Unit
-                    if direction:Dot(viewVector) > math.cos(math.rad(60)) then
-                        table.insert(players, {
-                            Player = player,
-                            Character = player.Character,
-                            PrimaryPart = primaryPart,
-                            LastPosition = primaryPart.Position,
-                            Velocity = primaryPart.AssemblyLinearVelocity
-                        })
-                    end
-                end
-            end
-        end
-    end
-    return players
-end
-
-local function getSafeBall()
-    local success, ball = pcall(AutoParry.Get_Ball)
-    return (success and ball) or nil
-end
-
-local function predictPosition(currentPos, velocity, time)
-    return currentPos + (velocity * time)
-end
-
-local function isStuck(currentPos)
-    if (currentPos - AIStuckCheck.lastPosition).Magnitude < 1.2 then
-        AIStuckCheck.stuckDuration = AIStuckCheck.stuckDuration + 1
-    else
-        AIStuckCheck.stuckDuration = 0
-    end
-    AIStuckCheck.lastPosition = currentPos
-    return AIStuckCheck.stuckDuration > 8
-end
-
-local function moveToPosition(character, targetPos, aggressive)
-    local humanoid = character:FindFirstChildOfClass("Humanoid")
-    local primaryPart = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
-    if not humanoid or not primaryPart then
-        return
-    end
-    local direction = (targetPos - primaryPart.Position).Unit
-    local raycastParams = RaycastParams.new()
-    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
-    raycastParams.FilterDescendantsInstances = {character}
-    local raycastResult = workspace:Raycast(primaryPart.Position, direction * 8, raycastParams)
-    if raycastResult and raycastResult.Instance then
-        if (AICooldowns.jump <= 0) and (humanoid.FloorMaterial ~= Enum.Material.Air) then
-            humanoid.Jump = true
-            AICooldowns.jump = 0.6 + (math.random() * 0.3)
-        end
-    end
-    if isStuck(primaryPart.Position) then
-        humanoid.Jump = true
-        if AICooldowns.dash <= 0 then
-            humanoid:MoveTo(primaryPart.Position + (Vector3.new(math.random(-1, 1), 0, math.random(-1, 1)) * 15))
-            AICooldowns.dash = 2 + math.random()
-        end
-    end
-    if aggressive then
-        humanoid:MoveTo(targetPos + (direction * 2))
-    else
-        humanoid:MoveTo(targetPos)
-    end
-end
-
-local AIMethods = {
-    Legit = function(character)
-        if not character then
-            return
-        end
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-        local primaryPart = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
-        if not humanoid or not primaryPart then
-            return
-        end
-        local ball = getSafeBall()
-        local validPlayers = getValidPlayers()
-        local target = nil
-        if ball and (math.random() > 0.4 or #validPlayers == 0) then
-            local predictionTime = 0.5 + (math.random() * 0.3)
-            target = {
-                Position = predictPosition(ball.Position, ball.Velocity, predictionTime),
-                Type = "Ball"
-            }
-        elseif #validPlayers > 0 then
-            if (AICooldowns.targetSwitch <= 0) or not AITarget then
-                AITarget = validPlayers[math.random(math.max(1, #validPlayers - 2), #validPlayers)]
-                AICooldowns.targetSwitch = 2 + (math.random() * 2)
-            end
-            if AITarget and AITarget.PrimaryPart then
-                local predictionTime = 0.4 + (math.random() * 0.2)
-                target = {
-                    Position = predictPosition(AITarget.PrimaryPart.Position, AITarget.Velocity, predictionTime),
-                    Type = "Player"
-                }
-            end
-        end
-        if target then
-            local idealDistance = math.random(8, 15)
-            local toTarget = target.Position - primaryPart.Position
-            local moveToPos = target.Position - (toTarget.Unit * idealDistance)
-            local shouldJump = (primaryPart.Position - target.Position).Magnitude < 15 and
-                              target.Position.Y > (primaryPart.Position.Y + 1.5) and
-                              humanoid.FloorMaterial ~= Enum.Material.Air and
-                              AICooldowns.jump <= 0
-            if shouldJump then
-                humanoid.Jump = true
-                AICooldowns.jump = 0.8 + (math.random() * 0.4)
-            end
-            moveToPosition(character, moveToPos, true)
-        else
-            local wanderPos = primaryPart.Position + Vector3.new(math.random(-25, 25), 0, math.random(-25, 25))
-            moveToPosition(character, wanderPos, false)
-        end
-    end
-}
-
-local function runAI()
-    local lastUpdate = os.clock()
-    while AIPlaying do
-        local character = LocalPlayer.Character
-        if character and character.Parent == Alive then
-            local deltaTime = os.clock() - lastUpdate
-            lastUpdate = os.clock()
-            for k, v in pairs(AICooldowns) do
-                AICooldowns[k] = math.max(0, v - deltaTime)
-            end
-            local success, err = pcall(function()
-                if AIMethods[AICurrentMethod] then
-                    AIMethods[AICurrentMethod](character)
-                end
-            end)
-            if not success then
-                warn("AI Error:", err)
-                AICurrentMethod = "Legit"
-            end
-        end
-        task.wait(0.05 + (math.random() * 0.1))
-    end
-end
-
------------------------------------------------------------
--- LOAD EXTERNAL LIBRARY AND SETUP UI TABS
+-- LOAD EXTERNAL LIBRARY AND UI DESIGN
 -----------------------------------------------------------
 local function loadExternalLib(url)
     local success, lib = pcall(function() return loadstring(game:HttpGet(url))() end)
-    if not success then
-        warn("Failed to load library from " .. url)
-        return nil
-    end
+    if not success then return nil end
     return lib
 end
 
 local externalLib = loadExternalLib("https://pastefy.app/I0MSD75W/raw")
 local mainLib = externalLib.__init()
--- CREATE TABS
-local mainTab   = mainLib.create_tab("Main")
+local mainTab = mainLib.create_tab("Main")
 
-
------------------------------------------------------------
--- MAIN TAB SETUP
------------------------------------------------------------
 mainTab.create_title({ name = "Combat", section = "left" })
 mainTab.create_description_toggle({
-  name = "Auto Parry",
-  description = "Automatically parries incoming balls",
-  flag = "pr",
-  enabled = false,
-  section = "left",
-  callback = function(state)
-    if state then
+    name = "Auto Parry",
+    description = "Automatically parries incoming balls",
+    flag = "pr",
+    enabled = false,
+    section = "left",
+    callback = function(state)
+        if state then
             connManager["Auto Parry"] = RunService.PreSimulation:Connect(function()
-                local ball = AutoParry.Get_Ball()
-                local ballList = AutoParry.fetchBalls()
-                for _, b in ipairs(ballList) do
-                    if not b then repeat task.wait() until b end
-                    local zoom = b:FindFirstChild("zoomies")
-                    if not zoom then return end
-                    b:GetAttributeChangedSignal("target"):Once(function() parryFlag = false end)
-                    if parryFlag then return end
-                    local ballTarget = b:GetAttribute("target")
-                    local primaryTarget = ball and ball:GetAttribute("target")
-                    local vel = zoom.VectorVelocity
-                    local dist = (LocalPlayer.Character.PrimaryPart.Position - b.Position).Magnitude
-                    local spd = vel.Magnitude
-                    local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
-                    local parryThresh = (spd / 3.75) + (ping * spd * 0.7)
-                    local curved = AutoParry.detectCurve()
-                    if ballTarget == tostring(LocalPlayer) and getgenv().AerodynamicActive then
-                        if tick() - (getgenv().AerodynamicTime or 0) >= (getgenv().AerodynamicDelay or 0.6) then
-                            getgenv().AerodynamicActive = false
-                        end
-                        return
-                    end
-                    if primaryTarget == tostring(LocalPlayer) and curved then 
-                        return 
-                    end
-                    if ballTarget == tostring(LocalPlayer) and dist <= parryThresh then
-                        AutoParry.triggerParry(selectedParryMode)
-                        parryFlag = true
-                    end
-                    local lastCycle = tick()
-                    repeat 
-                        RunService.PreSimulation:Wait() 
-                    until (tick() - lastCycle) >= 1 or not parryFlag
+                local b = util.ball()
+                if not b then 
                     parryFlag = false
+                    return 
+                end
+                
+                local zoom = b:FindFirstChild("zoomies")
+                if not zoom then return end
+                
+                local ballTarget = b:GetAttribute("target")
+                local vel = zoom.VectorVelocity
+                local dist = (LocalPlayer.Character.PrimaryPart.Position - b.Position).Magnitude
+                local spd = vel.Magnitude
+                local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
+                local parryThresh = (spd / 3.75) + (ping * spd * 0.7)
+                local curved = AutoParry.detectCurve()
+                
+                if ballTarget == tostring(LocalPlayer) and getgenv().AerodynamicActive then
+                    if tick() - (getgenv().AerodynamicTime or 0) >= (getgenv().AerodynamicDelay or 0.6) then
+                        getgenv().AerodynamicActive = false
+                    end
+                    return
+                end
+                
+                if ballTarget == tostring(LocalPlayer) and curved then return end
+                
+                if ballTarget == tostring(LocalPlayer) and dist <= parryThresh then
+                    if not parryFlag then
+                        parryFlag = true
+                        AutoParry.triggerParry(selectedParryMode)
+                        task.delay(0.3, function() parryFlag = false end)
+                    end
                 end
             end)
         else
@@ -902,22 +699,21 @@ mainTab.create_description_toggle({
                 connManager["Auto Parry"]:Disconnect()
                 connManager["Auto Parry"] = nil
             end
+            parryFlag = false
         end
-  end
+    end
 })
 
-
-
 mainTab.create_description_toggle({
-  name = "Auto Spam",
-  description = "Automatically spams when conditions are met",
-  flag = "Spams",
-  enabled = false,
-  section = "left",
-  callback = function(state)
-    if state then
+    name = "Auto Spam",
+    description = "Automatically spams when conditions are met",
+    flag = "Spams",
+    enabled = false,
+    section = "left",
+    callback = function(state)
+        if state then
             connManager["Auto Spam"] = RunService.Heartbeat:Connect(function()
-                local Ball = Spam.FetchBall()
+                local Ball = util.ball()
                 if not Ball or not Ball:FindFirstChild("zoomies") then
                     Spamming = false
                     return
@@ -944,9 +740,7 @@ mainTab.create_description_toggle({
 
                 if Spamming then
                     for _ = 1, spamSpeed do
-                        task.spawn(function()
-                            AutoParry.Parry(false)
-                        end)
+                        task.spawn(function() AutoParry.Parry(false) end)
                     end
                 end
             end)
@@ -956,81 +750,70 @@ mainTab.create_description_toggle({
             connManager["Auto Spam"] = nil
             Spamming = false
         end
-  end
+    end
 })
 
 mainTab.create_slider({
-  name = "Spam Threshold",
-  flag = "spam_threshold",
-  section = "right",
-  value = 0.2,
-  minimum_value = 0.1,
-  maximum_value = 5,
-  callback = function(val)
-  spamThreshold = value  
-  end
+    name = "Spam Threshold",
+    flag = "spam_threshold",
+    section = "right",
+    value = 0.2,
+    minimum_value = 0.1,
+    maximum_value = 5,
+    callback = function(val) spamThreshold = val end
 })
-
 
 mainTab.create_slider({
-  name = "Auto Spam Speed",
-  flag = "fps",
-  section = "right",
-  value = 150,
-  minimum_value = 0,
-  maximum_value = 50,
-  callback = function(value) 
-       spamSpeed = math.floor(value)
-      end
+    name = "Auto Spam Speed",
+    flag = "fps",
+    section = "right",
+    value = 150,
+    minimum_value = 0,
+    maximum_value = 50,
+    callback = function(value) spamSpeed = math.floor(value) end
 })
-
 
 mainTab.create_dropdown({
-  name = "Curve Position",
-  flag = "po",
-  section = "left",
-  option = "Custom",
-  options = {"Custom", "Random", "Backwards", "Straight", "Up", "Right", "Left", "Dot"},
-  callback = function(value)
-    selectedParryMode = value
-  end
+    name = "Curve Position",
+    flag = "po",
+    section = "left",
+    option = "Custom",
+    options = {"Custom", "Random", "Backwards", "Straight", "Up", "Right", "Left", "Dot"},
+    callback = function(value) selectedParryMode = value end
 })
 
 mainTab.create_description_toggle({
-  name = "Tracker",
-  description = "Shows the parry range",
-  flag = "Spams",
-  enabled = false,
-  section = "left",
-  callback = function(state)
-toggleVisualizer(state)
-  end
+    name = "Tracker",
+    description = "Shows the parry range",
+    flag = "Spams",
+    enabled = false,
+    section = "left",
+    callback = function(state) toggleVisualizer(state) end
 })
 
 mainTab.create_description_toggle({
-  name = "Manual Spam", 
-  description = "an auto click button.",
-  flag = "No_Render_Toggle", 
-  enabled = false,
-  section = "left", 
-  callback = function(state)
-  manualSpamEnabled = state
+    name = "Manual Spam", 
+    description = "An auto click overlay button",
+    flag = "No_Render_Toggle", 
+    enabled = false,
+    section = "left", 
+    callback = function(state)
+        manualSpamEnabled = state
         screenGui.Enabled = state
         if not state then
             spamming = false
             spamButton.Text = "ON"
             spamButton.TextColor3 = Color3.fromRGB(50, 255, 50)
         end
-  end
+    end
 })
+
 mainTab.create_slider({
-  name = "Manual Spam Rate",
-  flag = "fps",
-  section = "right",
-  value = 150,
-  minimum_value = 0,
-  maximum_value = 10,
-  callback = function(value) 
-      spamRate = value
-      end
+    name = "Manual Spam Rate",
+    flag = "fps",
+    section = "right",
+    value = 150,
+    minimum_value = 0,
+    maximum_value = 10,
+    callback = function(value) spamRate = value end
 })
