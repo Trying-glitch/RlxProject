@@ -370,6 +370,67 @@ AutoParry.Parry = function(isSpam)
                 hasFired = true
             end
         end
+-- Updated Execution Sequence Matching the 7-Arg Hook Setup (Safe Anti-Detection Blend)
+AutoParry.Parry = function(isSpam)
+    if isOnParryCooldown then return false end
+    if tick() - lastParryTime < parryCooldown then return false end
+    lastParryTime = tick()
+
+    local presses = isSpam and spamSpeed or 1
+    local hasFired = false
+
+    -- Check if we have captured real arguments via our metatable hook dictionary yet
+    local trackingFound = false
+    for _, _ in pairs(hookedRemotes) do
+        trackingFound = true
+        break
+    end
+
+    if not trackingFound then
+        -- Fallback sequence using hardware inputs if no network traffic captured yet
+        for i = 1, presses do
+            VirtualInput:SendKeyEvent(true, Enum.KeyCode.F, false, game)
+            VirtualInput:SendKeyEvent(false, Enum.KeyCode.F, false, game)
+        end
+        hasFired = true
+    else
+        local DynamicParryData = AutoParry.computeParryData(selectedParryMode)
+        
+        local mouseLocation = UserInputService:GetMouseLocation()
+        local cursorPos = { mouseLocation.X, mouseLocation.Y }
+        
+        local playerScreenPositions = {}
+        local aliveFolder = workspace:FindFirstChild("Alive")
+        if aliveFolder then
+            for _, character in ipairs(aliveFolder:GetChildren()) do
+                if character:IsA("Model") and character.PrimaryPart then
+                    pcall(function()
+                        playerScreenPositions[character.Name] = workspace.CurrentCamera:WorldToScreenPoint(character.PrimaryPart.Position)
+                    end)
+                end
+            end
+        end
+
+        -- Execute through captured remotes using genuine structural tracking data
+        for remote, originalArgs in pairs(hookedRemotes) do
+            if remote.Parent then
+                -- Safely merge your computing configurations with the original args
+                local targetHash    = originalArgs[1]
+                local actionName    = originalArgs[2]
+                local sequenceNum   = DynamicParryData[1] or originalArgs[3] 
+                local parryCFrame   = DynamicParryData[2] or originalArgs[4]
+                local entityTable   = playerScreenPositions or originalArgs[5]
+                local mousePosTable = cursorPos or originalArgs[6]
+                local stateFlag     = originalArgs[7]
+
+                if remote:IsA("RemoteEvent") then
+                    remote:FireServer(targetHash, actionName, sequenceNum, parryCFrame, entityTable, mousePosTable, stateFlag)
+                elseif remote:IsA("RemoteFunction") then
+                    remote:InvokeServer(targetHash, actionName, sequenceNum, parryCFrame, entityTable, mousePosTable, stateFlag)
+                end
+                hasFired = true
+            end
+        end
     end
 
     -- Reference hardware-level rate limiting check
