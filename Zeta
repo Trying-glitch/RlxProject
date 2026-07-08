@@ -69,7 +69,7 @@ local function SendNotify(title, content, duration)
 end
 
 -- Load Rise Library
-local Rise = loadstring(game:HttpGet("YOUR_RISE_UI_LINK_HERE"))() 
+local Rise = loadstring(game:HttpGet("https://raw.githubusercontent.com/Trying-glitch/RlxProject/refs/heads/main/Rise.txt"))() 
 local Tabs = Rise.__init()
 
 local MainTab = Tabs.create_tab("main")
