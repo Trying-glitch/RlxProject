@@ -759,8 +759,8 @@ MainTab.create_dropdown({
 
 local CurveHotkeys = {
 	[Enum.KeyCode.One] = "camera",
-	 = "dot",
-	 = "backwards",
+	  "dot",
+	  "backwards",
 	[Enum.KeyCode.Four] = "slow",
 	[Enum.KeyCode.Five] = "random",
 }
