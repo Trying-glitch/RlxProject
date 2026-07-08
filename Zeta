@@ -100,8 +100,9 @@ local hookedRemotes = {}
 local hookedMetatables = {}
 local lastActionName
 function isValidRemoteArgs(args)
-	return # args == 7 and type(args[1]) == "string" and type(args[2]) == "number" and typeof(args[3]) == "CFrame" and type(args[4]) == "table" and type(args) == "table" and type(args) == "boolean"
+	return #args >= 7 and type(args[1]) == "string" and type(args[2]) == "number" and typeof(args[3]) == "CFrame" and type(args[4]) == "table" and type(args[5]) == "table" and type(args[6]) == "table" and type(args[7]) == "boolean"
 end
+
 function hookRemote(remote)
 	if hookedRemotes[remote] then
 		return
@@ -369,7 +370,7 @@ function Util.perfom_spam(params)
 	local targetPos = target.PrimaryPart.Position
 	local distToTarget = LocalPlayer:DistanceFromCharacter(targetPos)
 	local baseRadius = params.Ping + math.min(speed / 6, 6)
-	if params.Entity_Properties.distance > baseRadius then
+	if not params.Entity_Properties or params.Entity_Properties.distance > baseRadius then
 		return spamRadius
 	end
 	if params.Ball_Properties.Distance > baseRadius then
@@ -630,7 +631,7 @@ MainTab.create_toggle({
 					if primaryTarget == LocalPlayer.Name and isCurved then
 						return
 					end
-					if ballTarget == LocalPlayer.Name and distToBall <= parryDistance and timingScale * 0.8 then
+					if ballTarget == LocalPlayer.Name and distToBall <= (parryDistance * timingScale * 0.8) then
 						Util.parry(_G.config.curve_method)
 						isOnParryCooldown = true
 					end
@@ -759,11 +760,12 @@ MainTab.create_dropdown({
 
 local CurveHotkeys = {
 	[Enum.KeyCode.One] = "camera",
-	  "dot",
-	  "backwards",
+	[Enum.KeyCode.Two] = "dot",
+	[Enum.KeyCode.Three] = "backwards",
 	[Enum.KeyCode.Four] = "slow",
 	[Enum.KeyCode.Five] = "random",
 }
+
 local lastSetCurveMethod
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	if gameProcessed then
@@ -1129,11 +1131,12 @@ VisualTab.create_toggle({
     flag = "skin_changer",
     section = "left",
 	enabled = _G.config.skin_changer or false,
-	callback = function(enabled)
+		callback = function(enabled)
 		_G.config.skin_changer = enabled
 		task.spawn(function()
 			if enabled then
-				originalSwordName = LocalPlayer.Character:GetAttribute("CurrentlyEquippedSword")
+				local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+				originalSwordName = char:GetAttribute("CurrentlyEquippedSword")
 				getgenv().updateSword()
 				if LocalPlayer.Character then
 					hookSwordDeath(LocalPlayer.Character)
