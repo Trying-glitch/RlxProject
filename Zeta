@@ -830,7 +830,7 @@ ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(slashEf
 	local speedBonus = math.min(speed / 100, 40)
 	local timeToArrive = distToBall / speed - (pingMs / 1000)
 	local isHighSpeed = speed > 100
-	local parryRadius = 25 - math.min(distToBall / 1000, 15) + speedBonus
+	local parryRadius = 15 - math.min(distToBall / 1000, 15) + speedBonus
 	if isHighSpeed and timeToArrive > pingMs / 10 then
 		parryRadius = math.max(parryRadius - 15, 15)
 	end
