@@ -750,8 +750,9 @@ if enabled then
                 activeConnections.auto_parry = nil
             end
         end
-    end,
-    section = "left"
+    end
+end,
+section = "left"
 })
 
 ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(slashEffect, swordPart)
