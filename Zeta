@@ -544,7 +544,7 @@ MainTab.create_description_toggle({
                     local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
                     
                     -- DYNAMIC CALCULATION: Fixes slow ball "late" parry
-                    local baseThreshold = 15 
+                    local baseThreshold = 18 
                     local speedAdjustment = math.clamp(spd / 50, 0, 25) 
                     local pingAdjustment = (ping * spd * 0.7) 
                     local parryThresh = baseThreshold + speedAdjustment + pingAdjustment
