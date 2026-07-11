@@ -511,7 +511,7 @@ _G.config.curve_method = _G.config.curve_method or "camera"
 -----------------------------------------------------------
 MainTab.create_description_toggle({
     name = "Auto Parry",
-    description = "Automatically parry everytimes targeted",
+    description = "Automatically parry when targeted with dynamic timing",
     flag = "auto_parry",
     enabled = _G.config.auto_parry or false,
     callback = function(enabled)
@@ -534,25 +534,26 @@ MainTab.create_description_toggle({
                     local ballTarget = b:GetAttribute("target")
                     local isCurved = Util.detectCurve(b)
                     
-                    -- Ignore if it's explicitly curved to trick us, unless we are definitely the target
                     if ballTarget ~= tostring(LocalPlayer) and isCurved then 
                         continue 
                     end
                     
                     local vel = zoom.VectorVelocity
-                    local dist = (LocalPlayer.Character.PrimaryPart.Position - b.Position).Magnitude
                     local spd = vel.Magnitude
+                    local dist = (LocalPlayer.Character.PrimaryPart.Position - b.Position).Magnitude
                     local ping = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
                     
-                    -- Timing calculation
-                    local parryThresh = (spd / 3.75) + (ping * spd * 0.7)
+                    -- DYNAMIC CALCULATION: Fixes slow ball "late" parry
+                    local baseThreshold = 20 
+                    local speedAdjustment = math.clamp(spd / 50, 0, 25) 
+                    local pingAdjustment = (ping * spd * 0.7) 
+                    local parryThresh = baseThreshold + speedAdjustment + pingAdjustment
                     
                     if ballTarget == tostring(LocalPlayer) and dist <= parryThresh then
                         Util.parry(_G.config.curve_method)
                         parryFlag = true
                     end
                     
-                    -- Safely reset the flag if the loop hangs
                     local lastCycle = tick()
                     task.spawn(function()
                         repeat 
