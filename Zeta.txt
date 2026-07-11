@@ -656,6 +656,94 @@ MainTab.create_description_toggle({
                     end
                 end
             end)
+if enabled then
+            activeConnections.auto_parry = RunService.PreSimulation:Connect(function()
+                -- 1. If we are waiting for the server to register a parry, skip this frame
+                if isParrying then return end
+                
+                local ballProps = Util.ball.properties
+                local primaryBall = Util.get_ball()
+                local allBalls = Util.get_balls()
+                
+                for _, ball in allBalls do
+                    if not ball then continue end
+                    local zoomies = ball:FindFirstChild("zoomies")
+                    if not zoomies then continue end
+                    
+                    -- Aerodynamic logic (Unchanged)
+                    if ball:FindFirstChild("AeroDynamicSlashVFX") then
+                        Debris:AddItem(ball.AeroDynamicSlashVFX, 0)
+                        ballProps.aerodynamic_time = tick()
+                    end
+                    if workspace.Runtime:FindFirstChild("Tornado") then
+                        local tornadoTime = workspace.Runtime.Tornado:GetAttribute("TornadoTime") or 1
+                        if (tick() - ballProps.aerodynamic_time) < tornadoTime + 0.314159 then
+                            continue
+                        end
+                    end
+                    
+                    local ballTarget = ball:GetAttribute("target")
+                    if ballTarget ~= LocalPlayer.Name then continue end
+                    
+                    -- Physics/Distance Math (Moved up for Anti-Curve calculation)
+                    local velocity = zoomies.VectorVelocity
+                    local speed = velocity.Magnitude
+                    local dist = (LocalPlayer.Character.PrimaryPart.Position - ball.Position).Magnitude
+                    
+                    local pingValue = Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 10
+                    local timingBase = 2.4 + math.min(math.max(speed - 9.5, 0), 650) * 0.002
+                    local timingFinal = math.max(timingBase * (accuracyMultiplier or 1), 0.01)
+                    local parryDistance = (pingValue / 10) + math.max(speed / timingFinal, 9.5)
+
+                    -- Anti-Curve Upgrade: Panic parry if a curved ball enters the danger zone
+                    if Util.ball_curved() then 
+                        local panicDistance = math.max(14, parryDistance * 0.6) -- 60% of parry distance or min 14 studs
+                        if dist <= panicDistance then
+                            isParrying = true 
+                            Util.parry(_G.config.curve_method)
+                            
+                            ball:GetAttributeChangedSignal("target"):Once(function()
+                                task.delay(0.15, function()
+                                    isParrying = false
+                                end)
+                            end)
+                            
+                            local actualPingMs = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+                            local fallbackDelay = math.max((actualPingMs / 1000) + 0.15, 0.3)
+                            task.delay(fallbackDelay, function()
+                                isParrying = false
+                            end)
+                            break 
+                        end
+                        continue 
+                    end
+                    
+                    if dist <= parryDistance then
+                        -- 2. Lock the state immediately
+                        isParrying = true 
+                        
+                        Util.parry(_G.config.curve_method)
+                        
+                        -- 3. THE FIX: Server confirms target changed, BUT we add a 0.15s grace period
+                        -- This allows the fast visual ball to physically exit your parry radius before unlocking
+                        ball:GetAttributeChangedSignal("target"):Once(function()
+                            task.delay(0.15, function()
+                                isParrying = false
+                            end)
+                        end)
+                        
+                        -- 4. Ping-Based Fallback (Unchanged)
+                        local actualPingMs = Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+                        local fallbackDelay = math.max((actualPingMs / 1000) + 0.15, 0.3)
+                        
+                        task.delay(fallbackDelay, function()
+                            isParrying = false
+                        end)
+                        
+                        break
+                    end
+                end
+            end)
         else
             if activeConnections.auto_parry then
                 activeConnections.auto_parry:Disconnect()
