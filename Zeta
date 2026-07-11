@@ -830,7 +830,7 @@ ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function(slashEf
 	local speedBonus = math.min(speed / 100, 40)
 	local timeToArrive = distToBall / speed - (pingMs / 1000)
 	local isHighSpeed = speed > 100
-	local parryRadius = 15 - math.min(distToBall / 1000, 15) + speedBonus
+	local parryRadius = 25 - math.min(distToBall / 1000, 15) + speedBonus
 	if isHighSpeed and timeToArrive > pingMs / 10 then
 		parryRadius = math.max(parryRadius - 15, 15)
 	end
@@ -1126,8 +1126,8 @@ MainTab.create_description_toggle({
 											if tick() - lastSpamTick > 0.1 then
 												lastSpamTick = tick()
 												
-												-- 2. Dynamic Spam: Calculate amount based on ball speed (min 5, max 17)
-												local spamAmount = math.clamp(math.floor(ballSpeed / 30), 5, 17)
+												-- 2. Dynamic Spam: Calculate amount based on ball speed (min 7, max 17)
+												local spamAmount = math.clamp(math.floor(ballSpeed / 30), 7, 17)
 												
 												-- 3. Asynchronous Execution: Prevents the main loop from lagging
 												task.spawn(function()
