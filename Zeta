@@ -793,7 +793,7 @@ MainTab.create_description_toggle({
 
 									if tick() - lastSpamTick > 0.1 then
 										lastSpamTick = tick()
-										local spamAmount = math.clamp(math.floor(ballSpeed / 30), 7, 17)
+										local spamAmount = math.clamp(math.floor(ballSpeed / 30), 5, 20)
 										task.spawn(function()
 											for i = 1, spamAmount do
 												Util.parry()
