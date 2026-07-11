@@ -727,7 +727,7 @@ if enabled then
                         -- 3. THE FIX: Server confirms target changed, BUT we add a 0.15s grace period
                         -- This allows the fast visual ball to physically exit your parry radius before unlocking
                         ball:GetAttributeChangedSignal("target"):Once(function()
-                            task.delay(0.15, function()
+                            task.delay(0.20, function()
                                 isParrying = false
                             end)
                         end)
@@ -1126,8 +1126,8 @@ MainTab.create_description_toggle({
 											if tick() - lastSpamTick > 0.1 then
 												lastSpamTick = tick()
 												
-												-- 2. Dynamic Spam: Calculate amount based on ball speed (min 5, max 15)
-												local spamAmount = math.clamp(math.floor(ballSpeed / 30), 5, 15)
+												-- 2. Dynamic Spam: Calculate amount based on ball speed (min 5, max 17)
+												local spamAmount = math.clamp(math.floor(ballSpeed / 30), 5, 17)
 												
 												-- 3. Asynchronous Execution: Prevents the main loop from lagging
 												task.spawn(function()
