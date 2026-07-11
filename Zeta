@@ -749,6 +749,7 @@ MainTab.create_description_toggle({
 			autoSpamCoroutine = coroutine.create(function(signal)
 				local RunService = game:GetService("RunService")
 				local lastSpamTick = 0
+				local isCurrentlySpamming = false -- Track state for notifications
 
 				while _G.config.auto_spam and (signal ~= "stop") do
 					local ball = Util.get_ball()
@@ -761,44 +762,50 @@ MainTab.create_description_toggle({
 								local playerDistance = LocalPlayer:DistanceFromCharacter(ball.Position)
 								local targetPosition = targetPlayer.PrimaryPart.Position
 								local targetDistance = LocalPlayer:DistanceFromCharacter(targetPosition)
-								if targetPlayer.Parent then
-									if ball.Position.Magnitude >= 1 then
-										local ballVelocity = ball.Velocity.Magnitude
-										local ballSpeed = math.max(ballVelocity, 0)
-										local ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
-										local pingThreshold = math.clamp(ping / 10, 10, 16)
-										local ballProperties = Util:get_ball_properties()
-										local entityProperties = Util:players_properties()
-										local threshold = _G.config.spam_threshold or 3
+								
+								-- Threshold Trigger Calculation
+								local ballVelocity = ball.AssemblyLinearVelocity.Magnitude
+								local ballSpeed = math.max(ballVelocity, 0)
+								local ping = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+								local pingThreshold = math.clamp(ping / 10, 10, 16)
+								local ballProperties = Util:get_ball_properties()
+								local entityProperties = Util:players_properties()
+								local threshold = _G.config.spam_threshold or 3
 										
-										local spamAccuracy = Util.perfom_spam({
-											Ball_Properties = ballProperties,
-											Entity_Properties = entityProperties,
-											Ping = pingThreshold,
-											Spam_Sensitivity = threshold
-										})
-										
-										local currentParryCount = Parries or _G.parryCount or 0
-										
-										if (zoomies.Parent == ball) and ((playerDistance <= 30) or (targetDistance <= 30)) and (currentParryCount > 1) then
-											if tick() - lastSpamTick > 0.1 then
-												lastSpamTick = tick()
-												local spamAmount = math.clamp(math.floor(ballSpeed / 30), 7, 17)
-												task.spawn(function()
-													for i = 1, spamAmount do
-														Util.parry()
-														RunService.Heartbeat:Wait()
-													end
-												end)
+								local spamAccuracy = Util.perfom_spam({
+									Ball_Properties = ballProperties,
+									Entity_Properties = entityProperties,
+									Ping = pingThreshold,
+									Spam_Sensitivity = threshold
+								})
+								
+								local currentParryCount = Parries or _G.parryCount or 0
+								
+								-- Determine if we should be spamming
+								local shouldSpam = (zoomies.Parent == ball) and ((playerDistance <= 30) or (targetDistance <= 30)) and (currentParryCount > 1)
+
+								if shouldSpam then
+									-- Start spam notification
+									if not isCurrentlySpamming then
+										isCurrentlySpamming = true
+										Notify({Title = "Auto Spam", Content = "Spamming Active", Duration = 2})
+									end
+
+									if tick() - lastSpamTick > 0.1 then
+										lastSpamTick = tick()
+										local spamAmount = math.clamp(math.floor(ballSpeed / 30), 7, 17)
+										task.spawn(function()
+											for i = 1, spamAmount do
+												Util.parry()
+												task.wait(math.random(0.02, 0.04)) -- Added randomization to prevent kicks
 											end
-										end
-									else
-										local waitTime = 0
-										repeat
-											task.wait(0.1)
-											waitTime = waitTime + 0.1
-											ball = Util.get_ball()
-										until (ball and ball:IsDescendantOf(workspace) and (ball.Position.Magnitude > 1)) or (waitTime >= 2.5)
+										end)
+									end
+								else
+									-- Stop spam notification
+									if isCurrentlySpamming then
+										isCurrentlySpamming = false
+										Notify({Title = "Auto Spam", Content = "Spamming Inactive", Duration = 2})
 									end
 								end
 							end
