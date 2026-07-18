@@ -170,6 +170,7 @@ function AcrylicBlur:create_root()
 
     -- Create a SpecialMesh to simulate the acrylic blur effect
     local specialMesh = Instance.new('SpecialMesh')
+    specialMesh.Name = 'Mesh'
     specialMesh.MeshType = Enum.MeshType.Brick  -- Use Brick mesh or another type suitable for the effect
     specialMesh.Offset = Vector3.new(0, 0, -0.000001)  -- Small offset to prevent z-fighting
     specialMesh.Parent = part
@@ -220,7 +221,11 @@ function AcrylicBlur:render(distance: number)
         end
 
         self._root.CFrame = CFrame.fromMatrix((top_left3D + bottom_right3D) / 2, workspace.CurrentCamera.CFrame.XVector, workspace.CurrentCamera.CFrame.YVector, workspace.CurrentCamera.CFrame.ZVector)
-        self._root.Mesh.Scale = Vector3.new(width, height, 0)
+
+        local mesh = self._root:FindFirstChild('Mesh')
+        if mesh then
+            mesh.Scale = Vector3.new(width, height, 0)
+        end
     end
 
     local function on_change()
