@@ -1,3 +1,12 @@
+local CoreGui = game:GetService("CoreGui")
+local Lighting = game:GetService("Lighting")
+local Debris = game:GetService("Debris")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local TextService = game:GetService("TextService")
+local HttpService = game:GetService("HttpService")
+local ContentProvider = game:GetService("ContentProvider")
+
 getgenv().GG = {
     Language = {
         CheckboxEnabled = "Enabled",
