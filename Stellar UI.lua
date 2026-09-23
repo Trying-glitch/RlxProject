@@ -401,6 +401,115 @@ function Util:resolve_asset_id(id)
 end
 
 --=====================================================================
+--  Animated logo (sprite sheets)
+--=====================================================================
+-- The original Stellar library shipped a little animated cat sprite and
+-- Ethereal ships its own animated mark. Both are plain sprite sheets, so
+-- we can play either one by stepping ImageRectOffset on an ImageLabel.
+--
+-- Each entry: image + the sheet's pixel size + its grid + frame count/fps.
+local Logo_Animations = {
+    Stellar = {
+        image   = 'rbxassetid://74080484918102', -- Stellar cat (5 frames)
+        width   = 60,  height = 40,
+        columns = 3,   rows   = 2,
+        frames  = 5,   fps    = 10
+    },
+    Ethereal = {
+        image   = 'rbxassetid://133009150415671', -- Ethereal mark (8 frames)
+        width   = 150, height = 120,
+        columns = 3,   rows   = 3,
+        frames  = 8,   fps    = 12
+    }
+}
+
+-- Plays a sprite sheet on an ImageLabel. Returns a stop() function. The
+-- loop self-terminates as soon as the label leaves the DataModel, so it
+-- is safe to fire-and-forget.
+function Util:animate_sprite(image_label, sheet)
+    local noop = function() end
+    if not image_label or type(sheet) ~= 'table' then return noop end
+
+    local columns = math.max(1, tonumber(sheet.columns) or 1)
+    local rows    = math.max(1, tonumber(sheet.rows) or 1)
+    local frames  = math.max(1, tonumber(sheet.frames) or (columns * rows))
+    local fps     = math.max(1, tonumber(sheet.fps) or 10)
+
+    if sheet.image then
+        image_label.Image = Util:resolve_asset_id(sheet.image) or sheet.image
+    end
+
+    local sheet_width  = tonumber(sheet.width) or 0
+    local sheet_height = tonumber(sheet.height) or 0
+    if sheet_width > 0 and sheet_height > 0 then
+        image_label.ImageRectSize = Vector2.new(
+            math.floor(sheet_width / columns),
+            math.floor(sheet_height / rows)
+        )
+    end
+
+    local frame_size = image_label.ImageRectSize
+    if not frame_size or frame_size.X <= 0 or frame_size.Y <= 0 then
+        return noop
+    end
+
+    local offsets = {}
+    for index = 0, frames - 1 do
+        local column = index % columns
+        local row = math.floor(index / columns)
+        offsets[index + 1] = Vector2.new(column * frame_size.X, row * frame_size.Y)
+    end
+
+    image_label.ImageRectOffset = offsets[1]
+
+    local stopped = false
+    local index = 1
+    task.spawn(function()
+        while not stopped and image_label and image_label.Parent do
+            task.wait(1 / fps)
+            if stopped or not image_label or not image_label.Parent then break end
+            index = (index % frames) + 1
+            image_label.ImageRectOffset = offsets[index]
+        end
+    end)
+
+    return function() stopped = true end
+end
+
+-- Applies either an animated sprite sheet or a plain static image to a
+-- logo ImageLabel and returns a stop() function.
+--
+-- options = {
+--     animation = 'Stellar' | 'Ethereal' | <sheet table> | false,
+--     image     = <asset id>   -- when given, shown statically
+-- }
+function Util:apply_logo(image_label, options)
+    local noop = function() end
+    if not image_label then return noop end
+    options = options or {}
+
+    local choice = options.animation
+    local sheet
+
+    if type(choice) == 'table' then
+        sheet = choice
+    elseif options.image == nil or options.image == false then
+        if choice ~= false then
+            sheet = Logo_Animations[choice or 'Stellar'] or Logo_Animations.Stellar
+        end
+    end
+
+    if sheet then
+        return Util:animate_sprite(image_label, sheet)
+    end
+
+    image_label.Image = Util:resolve_asset_id(options.image) or ''
+    image_label.ImageRectSize = Vector2.new(0, 0)
+    image_label.ImageRectOffset = Vector2.new(0, 0)
+    return noop
+end
+
+--=====================================================================
 --  Acrylic backdrop blur (ported from Stellar — quality gated)
 --=====================================================================
 local AcrylicBlur = {}
@@ -945,8 +1054,11 @@ function Library.create_loader(self, settings)
 
     local accent = settings.accent_color or Theme.Accent
     local stages = settings.stages or { settings.title or 'Loading' }
+    if #stages == 0 then stages = { settings.title or 'Loading' } end
     local rng = Random.new()
     local particles_alive = true
+    local closed = false
+    local auto_running = false
 
     local gui = create('ScreenGui', {
         Name = 'StellarLoader',
@@ -963,16 +1075,21 @@ function Library.create_loader(self, settings)
         AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = settings.backdrop_color or Color3.fromRGB(0, 0, 0),
         BackgroundTransparency = 1,
-        BorderSizePixel = 0
+        BorderSizePixel = 0,
+        ZIndex = 0
     }, gui)
 
     if settings.dim_background ~= false then
         tween(backdrop, 0.4, { BackgroundTransparency = settings.backdrop_transparency or 0.15 })
     end
 
+    -- Ambient sparkles drifting slowly behind the logo. Each one fades in,
+    -- drifts upward, fades out, then respawns elsewhere.
     local particle_layer = create('Frame', {
+        Name = 'ParticleLayer',
         Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1
+        BackgroundTransparency = 1,
+        ZIndex = 1
     }, gui)
 
     local function spawn_particle()
@@ -982,15 +1099,17 @@ function Library.create_loader(self, settings)
             Position = UDim2.new(rng:NextNumber(0.35, 0.65), 0, rng:NextNumber(0.4, 0.7), 0),
             BackgroundColor3 = accent,
             BackgroundTransparency = 1,
-            BorderSizePixel = 0
+            BorderSizePixel = 0,
+            ZIndex = 1
         }, particle_layer)
-        corner(dot, 1, 1)
+        corner(dot, 0, 1)
 
         task.spawn(function()
             while particles_alive and dot and dot.Parent do
+                local target_y = dot.Position.Y.Scale - rng:NextNumber(0.05, 0.12)
                 tween(dot, rng:NextNumber(2, 3.2), {
                     BackgroundTransparency = rng:NextNumber(0.3, 0.6),
-                    Position = UDim2.new(dot.Position.X.Scale, 0, dot.Position.Y.Scale - rng:NextNumber(0.05, 0.12), 0)
+                    Position = UDim2.new(dot.Position.X.Scale, 0, target_y, 0)
                 }, Enum.EasingStyle.Sine)
                 task.wait(rng:NextNumber(2, 3.2))
                 if not (particles_alive and dot and dot.Parent) then break end
@@ -1011,15 +1130,19 @@ function Library.create_loader(self, settings)
         Position = UDim2.fromScale(0.5, 0.5),
         Size = UDim2.fromOffset(300, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1
+        BackgroundTransparency = 1,
+        ZIndex = 2
     }, gui)
 
     list_layout(container, {
         FillDirection = Enum.FillDirection.Vertical,
         HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        VerticalAlignment = Enum.VerticalAlignment.Top,
         Padding = UDim.new(0, 16)
     })
 
+    -- Responsive scaling so the loader never looks oversized on a phone or
+    -- tiny on a large display.
     local scale = create('UIScale', {}, container)
     local function update_scale()
         local camera = Workspace.CurrentCamera
@@ -1028,25 +1151,45 @@ function Library.create_loader(self, settings)
         end
     end
     update_scale()
-    local scale_connection = Workspace.CurrentCamera:GetPropertyChangedSignal('ViewportSize'):Connect(update_scale)
+    local scale_connection
+    local camera = Workspace.CurrentCamera
+    if camera then
+        scale_connection = camera:GetPropertyChangedSignal('ViewportSize'):Connect(update_scale)
+    end
 
-    -- logo mark
+    -- Logo tile: a rounded accent chip holding the animated sprite, with a
+    -- soft glow that gently pulses behind it.
     local logo_holder = create('Frame', {
         LayoutOrder = 1,
-        Size = UDim2.fromOffset(72, 72),
-        BackgroundTransparency = 1
+        Size = UDim2.fromOffset(76, 76),
+        BackgroundTransparency = 1,
+        ZIndex = 2
     }, container)
 
-    local logo_bg = create('Frame', {
-        Name = 'LogoMark',
-        Size = UDim2.fromOffset(64, 64),
+    local glow = create('Frame', {
+        Name = 'Glow',
+        Size = UDim2.fromOffset(78, 78),
         Position = UDim2.fromScale(0.5, 0.5),
         AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = accent,
-        BorderSizePixel = 0
+        BackgroundTransparency = 0.88,
+        BorderSizePixel = 0,
+        ZIndex = 1
+    }, logo_holder)
+    corner(glow, 0, 1)
+
+    local logo_bg = create('Frame', {
+        Name = 'LogoMark',
+        Size = UDim2.fromOffset(62, 62),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundColor3 = accent,
+        BorderSizePixel = 0,
+        ZIndex = 2
     }, logo_holder)
     corner(logo_bg, 18)
     accent_gradient(logo_bg, 135)
+    local logo_scale = create('UIScale', { Scale = 0.4 }, logo_bg)
 
     local logo_image = create('ImageLabel', {
         Name = 'Logo',
@@ -1055,20 +1198,29 @@ function Library.create_loader(self, settings)
         AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundTransparency = 1,
         ImageColor3 = Color3.fromRGB(255, 255, 255),
-        Image = Util:resolve_asset_id(settings.logo) or '',
-        ScaleType = Enum.ScaleType.Fit
+        ImageTransparency = 1,
+        ScaleType = Enum.ScaleType.Fit,
+        ZIndex = 3
     }, logo_bg)
+    local stop_logo = Util:apply_logo(logo_image, {
+        animation = settings.animation or Library.Logo_Animation,
+        image = settings.logo
+    })
 
-    local logo_letter = create('TextLabel', {
-        Name = 'LogoLetter',
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        FontFace = font(Enum.FontWeight.Bold),
-        TextColor3 = Color3.fromRGB(255, 255, 255),
-        TextSize = 26,
-        Text = settings.logo and '' or 'S',
-        Visible = settings.logo == nil
-    }, logo_bg)
+    -- Pop the mark in with a little overshoot.
+    tween(logo_image, 0.6, { ImageTransparency = 0 }, Enum.EasingStyle.Back)
+    tween(logo_scale, 0.6, { Scale = 1 }, Enum.EasingStyle.Back)
+
+    -- Keep the glow breathing while the loader is alive.
+    task.spawn(function()
+        while not closed and glow and glow.Parent do
+            tween(glow, 1.5, { BackgroundTransparency = 0.74, Size = UDim2.fromOffset(90, 90) }, Enum.EasingStyle.Sine)
+            task.wait(1.5)
+            if closed or not (glow and glow.Parent) then break end
+            tween(glow, 1.5, { BackgroundTransparency = 0.9, Size = UDim2.fromOffset(78, 78) }, Enum.EasingStyle.Sine)
+            task.wait(1.5)
+        end
+    end)
 
     local title = create('TextLabel', {
         LayoutOrder = 2,
@@ -1077,7 +1229,8 @@ function Library.create_loader(self, settings)
         TextColor3 = Theme.Text,
         TextSize = 13,
         Text = settings.title or 'Preparing interface',
-        Size = UDim2.fromOffset(300, 16)
+        Size = UDim2.fromOffset(300, 16),
+        ZIndex = 2
     }, container)
     bind(title, 'TextColor3', 'Text')
 
@@ -1085,18 +1238,21 @@ function Library.create_loader(self, settings)
         LayoutOrder = 3,
         Size = UDim2.fromOffset(240, 4),
         BackgroundColor3 = Theme.Panel_3,
-        BorderSizePixel = 0
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 2
     }, container)
-    corner(bar, 1, 1)
+    corner(bar, 2)
     bind(bar, 'BackgroundColor3', 'Panel_3')
 
     local fill = create('Frame', {
         Name = 'Fill',
         Size = UDim2.new(0, 0, 1, 0),
         BackgroundColor3 = accent,
-        BorderSizePixel = 0
+        BorderSizePixel = 0,
+        ZIndex = 3
     }, bar)
-    corner(fill, 1, 1)
+    corner(fill, 2)
     accent_gradient(fill, 0)
 
     local stage_label = create('TextLabel', {
@@ -1106,56 +1262,114 @@ function Library.create_loader(self, settings)
         TextColor3 = Theme.Muted,
         TextSize = 11,
         Text = stages[1] or 'Loading...',
-        Size = UDim2.fromOffset(300, 14)
+        Size = UDim2.fromOffset(300, 14),
+        ZIndex = 2
     }, container)
     bind(stage_label, 'TextColor3', 'Muted')
 
+    -- Stage text crossfade. The token guards against stacked delays when
+    -- progress updates arrive faster than the fade completes.
     local current_stage = 1
-
+    local stage_token = 0
     local function set_stage_text(text)
         if not stage_label or not stage_label.Parent then return end
-        stage_label.TextTransparency = 1
+        stage_token = stage_token + 1
+        local token = stage_token
+        tween(stage_label, 0.12, { TextTransparency = 1 })
         task.delay(0.12, function()
-            if stage_label and stage_label.Parent then
-                stage_label.Text = text
-                tween(stage_label, 0.25, { TextTransparency = 0 })
-            end
+            if closed or token ~= stage_token then return end
+            if not (stage_label and stage_label.Parent) then return end
+            stage_label.Text = text
+            tween(stage_label, 0.22, { TextTransparency = 0 })
         end)
+    end
+
+    -- Bloom: the tile opens a little further with every stage it clears.
+    local bloom_base = 1
+    local bloom_peak = tonumber(settings.bloom_scale) or 1.35
+    local bloom_duration = tonumber(settings.bloom_duration) or 0.5
+    local function bloom_to_stage(index)
+        if not (logo_scale and logo_scale.Parent) then return end
+        local alpha = math.clamp(index / math.max(#stages, 1), 0, 1)
+        local target = bloom_base + (bloom_peak - bloom_base) * alpha
+        tween(logo_scale, bloom_duration, { Scale = target }, Enum.EasingStyle.Back)
+    end
+
+    -- Completion burst radiating from the mark.
+    local bursted = false
+    local function burst()
+        if bursted then return end
+        bursted = true
+        for _ = 1, 16 do
+            local dot = create('Frame', {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Size = UDim2.fromOffset(rng:NextNumber(3, 6), rng:NextNumber(3, 6)),
+                Position = UDim2.fromScale(0.5, 0.5),
+                BackgroundColor3 = accent,
+                BorderSizePixel = 0,
+                ZIndex = 4
+            }, logo_holder)
+            corner(dot, 0, 1)
+
+            local angle = rng:NextNumber(0, math.pi * 2)
+            local distance = rng:NextNumber(26, 52)
+            tween(dot, rng:NextNumber(0.5, 0.85), {
+                Position = UDim2.new(0.5, math.cos(angle) * distance, 0.5, math.sin(angle) * distance),
+                BackgroundTransparency = 1
+            }, Enum.EasingStyle.Quad)
+            Debris:AddItem(dot, 1.2)
+        end
+        if logo_scale and logo_scale.Parent then
+            tween(logo_scale, 0.3, { Scale = bloom_peak * 1.12 }, Enum.EasingStyle.Back)
+        end
     end
 
     local loader = { _gui = gui }
 
     function loader:set_stage(text)
+        if closed then return end
         set_stage_text(text)
     end
 
     function loader:set_progress(alpha)
+        if closed then return end
         alpha = math.clamp(alpha or 0, 0, 1)
         tween(fill, 0.25, { Size = UDim2.new(alpha, 0, 1, 0) }, Enum.EasingStyle.Quint)
         local index = math.min(#stages, math.floor(alpha * #stages) + 1)
         if index ~= current_stage then
             current_stage = index
             set_stage_text(stages[index])
+            bloom_to_stage(index)
         end
+        if alpha >= 1 then burst() end
     end
 
+    -- Idempotent close: teardown happens once, and an explicit override
+    -- callback still fires even if the loader already closed itself.
     function loader:close(override_callback)
+        if closed then
+            if override_callback then override_callback() end
+            return
+        end
+        closed = true
+        auto_running = false
         particles_alive = false
         if scale_connection then scale_connection:Disconnect() end
+        if stop_logo then stop_logo() end
 
         tween(backdrop, 0.4, { BackgroundTransparency = 1 })
         tween(container, 0.35, { Position = UDim2.fromScale(0.5, 0.54) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-        for _, child in ipairs(container:GetChildren()) do
-            if child:IsA('GuiObject') then
-                tween(child, 0.3, { BackgroundTransparency = 1 })
+        for _, descendant in ipairs(container:GetDescendants()) do
+            if descendant:IsA('GuiObject') then
+                tween(descendant, 0.3, { BackgroundTransparency = 1 })
             end
-            if child:IsA('TextLabel') then
-                tween(child, 0.3, { TextTransparency = 1 })
+            if descendant:IsA('TextLabel') then
+                tween(descendant, 0.3, { TextTransparency = 1 })
+            end
+            if descendant:IsA('ImageLabel') then
+                tween(descendant, 0.3, { ImageTransparency = 1 })
             end
         end
-        if logo_image then tween(logo_image, 0.3, { ImageTransparency = 1 }) end
-        if logo_letter then tween(logo_letter, 0.3, { TextTransparency = 1 }) end
-        if logo_bg then tween(logo_bg, 0.3, { BackgroundTransparency = 1 }) end
 
         task.wait(0.4)
         gui:Destroy()
@@ -1164,17 +1378,24 @@ function Library.create_loader(self, settings)
         if callback then callback() end
     end
 
+    set_stage_text(stages[1])
+
     if settings.auto_progress then
+        auto_running = true
         task.spawn(function()
-            local duration = settings.duration or 2.6
+            local duration = math.max(0.1, tonumber(settings.duration) or 2.6)
             local start = os.clock()
-            while os.clock() - start < duration do
-                loader:set_progress((os.clock() - start) / duration)
+            while auto_running and not closed do
+                local elapsed = os.clock() - start
+                loader:set_progress(math.min(elapsed / duration, 1))
+                if elapsed >= duration then break end
                 task.wait(0.03)
             end
-            loader:set_progress(1)
-            task.wait(0.45)
-            loader:close()
+            if not closed then
+                loader:set_progress(1)
+                task.wait(0.45)
+                if not closed then loader:close() end
+            end
         end)
     end
 
@@ -1185,6 +1406,15 @@ end
 --  Library core
 --=====================================================================
 Library._config = Config:load(game.GameId)
+
+-- Look & feel knobs. Set these before calling `Library.new()`.
+Library.Shadow = true            -- draw a soft drop shadow behind the window
+Library.Shadow_Spread = 8        -- total extra pixels (4px each side)
+Library.Shadow_Drop = 2          -- downward offset of the shadow
+Library.Shadow_Transparency = 0.55
+
+Library.Logo_Animation = 'Stellar' -- 'Stellar' | 'Ethereal' | sheet table | false
+Library.Logo = nil                 -- set to an asset id to use a static image
 
 Library._choosing_keybind = false
 Library._device = nil
@@ -1329,30 +1559,25 @@ function Library:create_ui()
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     }, CoreGui)
 
-    -- soft drop shadow layers (siblings behind the panel)
-    local shadow_far = create('Frame', {
-        Name = 'ShadowFar',
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(0, 0),
-        BackgroundColor3 = Color3.new(0, 0, 0),
-        BackgroundTransparency = 0.72,
-        BorderSizePixel = 0,
-        ZIndex = 1
-    }, Stellar)
-    corner(shadow_far, 22)
-
-    local shadow_near = create('Frame', {
-        Name = 'ShadowNear',
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(0, 0),
-        BackgroundColor3 = Color3.new(0, 0, 0),
-        BackgroundTransparency = 0.62,
-        BorderSizePixel = 0,
-        ZIndex = 1
-    }, Stellar)
-    corner(shadow_near, 19)
+    -- Tight drop shadow. Just a few pixels of depth so the panel reads as
+    -- floating — no big blurred halo. Set `Library.Shadow = false` to drop
+    -- it entirely, or tune the spread/transparency before `Library.new()`.
+    local shadow
+    local shadow_spread = tonumber(Library.Shadow_Spread) or 8
+    local shadow_drop = tonumber(Library.Shadow_Drop) or 2
+    if Library.Shadow ~= false then
+        shadow = create('Frame', {
+            Name = 'Shadow',
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(0, 0),
+            BackgroundColor3 = Color3.new(0, 0, 0),
+            BackgroundTransparency = tonumber(Library.Shadow_Transparency) or 0.55,
+            BorderSizePixel = 0,
+            ZIndex = 1
+        }, Stellar)
+        corner(shadow, 18)
+    end
 
     local Container = create('CanvasGroup', {
         Name = 'Container',
@@ -1377,10 +1602,15 @@ function Library:create_ui()
     local BODY_H = WIN_H - TOPBAR_H
 
     local function sync_shadow()
-        shadow_far.Position = Container.Position
-        shadow_near.Position = Container.Position
-        shadow_far.Size = UDim2.fromOffset(Container.Size.X.Offset + 26, Container.Size.Y.Offset + 26)
-        shadow_near.Size = UDim2.fromOffset(Container.Size.X.Offset + 12, Container.Size.Y.Offset + 14)
+        if not shadow then return end
+        shadow.Position = UDim2.new(
+            Container.Position.X.Scale, Container.Position.X.Offset,
+            Container.Position.Y.Scale, Container.Position.Y.Offset + shadow_drop
+        )
+        shadow.Size = UDim2.fromOffset(
+            Container.Size.X.Offset + shadow_spread,
+            Container.Size.Y.Offset + shadow_spread
+        )
     end
     Container:GetPropertyChangedSignal('Size'):Connect(sync_shadow)
     Container:GetPropertyChangedSignal('Position'):Connect(sync_shadow)
@@ -1427,12 +1657,15 @@ function Library:create_ui()
         ZIndex = 1
     }, TopBar)
 
-    local LogoMark = create('Frame', {
+    -- Top-left animated logo. Doubles as the open/minimize toggle.
+    local LogoMark = create('TextButton', {
         Name = 'LogoMark',
         Size = UDim2.fromOffset(30, 30),
         Position = UDim2.fromOffset(16, 10),
         BackgroundColor3 = Theme.Accent,
         BorderSizePixel = 0,
+        Text = '',
+        AutoButtonColor = false,
         ZIndex = 3
     }, TopBar)
     corner(LogoMark, 9)
@@ -1440,16 +1673,30 @@ function Library:create_ui()
     local logo_stroke = stroke(LogoMark, Theme.Accent_2, 1, 0.5)
     bind(logo_stroke, 'Color', 'Accent_2')
 
-    create('TextLabel', {
-        Name = 'LogoLetter',
-        Size = UDim2.fromScale(1, 1),
+    local LogoImage = create('ImageLabel', {
+        Name = 'Logo',
+        Size = UDim2.fromOffset(22, 22),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundTransparency = 1,
-        FontFace = font(Enum.FontWeight.Bold),
-        TextColor3 = Color3.fromRGB(255, 255, 255),
-        TextSize = 16,
-        Text = 'S',
+        ImageColor3 = Color3.fromRGB(255, 255, 255),
+        ScaleType = Enum.ScaleType.Fit,
         ZIndex = 4
     }, LogoMark)
+    local logo_scale = create('UIScale', { Scale = 1 }, LogoImage)
+    Util:apply_logo(LogoImage, {
+        animation = Library.Logo_Animation,
+        image = Library.Logo
+    })
+
+    LogoMark.MouseEnter:Connect(function()
+        tween(logo_stroke, 0.18, { Transparency = 0 })
+        tween(logo_scale, 0.18, { Scale = 1.12 })
+    end)
+    LogoMark.MouseLeave:Connect(function()
+        tween(logo_stroke, 0.18, { Transparency = 0.5 })
+        tween(logo_scale, 0.18, { Scale = 1 })
+    end)
 
     local Product = create('TextLabel', {
         Name = 'Product',
@@ -1487,12 +1734,12 @@ function Library:create_ui()
     }, Edition)
     bind(EditionLabel, 'TextColor3', 'Accent')
 
-    -- window controls
+    -- window controls (the top-left logo handles open/minimize now)
     local Controls = create('Frame', {
         Name = 'Controls',
         AnchorPoint = Vector2.new(1, 0.5),
         Position = UDim2.new(1, -14, 0.5, 0),
-        Size = UDim2.fromOffset(64, 26),
+        Size = UDim2.fromOffset(26, 26),
         BackgroundTransparency = 1,
         ZIndex = 3
     }, TopBar)
@@ -1524,16 +1771,15 @@ function Library:create_ui()
         return button
     end
 
-    local Minimize = make_control('–', 0)
-    local Close = make_control('×', 1)
-    Tooltip.attach(Minimize, 'Minimize')
+    local Close = make_control('×', 0)
     Tooltip.attach(Close, 'Close')
+    Tooltip.attach(LogoMark, 'Minimize / open')
 
     -- search
     local SearchBox = create('Frame', {
         Name = 'Search',
         AnchorPoint = Vector2.new(1, 0.5),
-        Position = UDim2.new(1, -92, 0.5, 0),
+        Position = UDim2.new(1, -52, 0.5, 0),
         Size = UDim2.fromOffset(180, 28),
         BackgroundColor3 = Theme.Panel_2,
         BorderSizePixel = 0,
@@ -1887,7 +2133,8 @@ function Library:create_ui()
         Columns = Columns,
         EmptyState = EmptyState,
         EmptyLabel = empty_label,
-        Minimize = Minimize,
+        LogoMark = LogoMark,
+        LogoImage = LogoImage,
         Close = Close,
         WIN_W = WIN_W,
         WIN_H = WIN_H
@@ -1937,7 +2184,8 @@ function Library:create_ui()
     --=================================================================
     --  Window controls
     --=================================================================
-    Minimize.MouseButton1Click:Connect(function()
+    -- The animated logo in the top-left opens/minimizes the window.
+    LogoMark.MouseButton1Click:Connect(function()
         self._ui_open = not self._ui_open
         self:change_visiblity(self._ui_open)
     end)
