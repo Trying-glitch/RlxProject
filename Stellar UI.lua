@@ -518,21 +518,30 @@ local function mix_color(a, b, t)
     )
 end
 
+-- Approximate rendered width of the edition badge text. The chip grows and
+-- shrinks with its label, so a build/version string like "ETHEREAL v2.1" fits
+-- without clipping or leaving a gap.
+local function edition_badge_width(text)
+    local length = #tostring(text or '')
+    return math.max(34, math.floor(length * 5.4) + 16)
+end
+
 -- Animated "wordmark" title (Discord-style).
 --
--- A UIGradient parented to a TextLabel tints the glyphs themselves. The sheen
--- is a *narrow* dark → bright → dark notch with the label's normal colour on
--- either side, so only roughly two glyphs are shaded at any moment instead of
--- half the title going black. The notch travels from just off the left edge to
--- just off the right edge and then repeats, so the loop covers the whole word
--- without a visible jump.
+-- A UIGradient parented to a TextLabel tints the glyphs themselves. The
+-- resting glyphs are a dimmed version of the theme text colour and a bright
+-- white highlight band travels across them, so the title reads as a glossy
+-- shine rather than flat text. The band is roughly three glyphs wide (not the
+-- one-glyph sliver it used to be), and it travels from fully off the left edge
+-- to fully off the right edge before repeating, so the loop never snaps a
+-- half-visible highlight back across the word.
 --
 -- The label's own TextColor3 is forced to white so the gradient colours are
 -- shown exactly as authored, and the palette is re-authored on every theme
--- change so the sheen always matches the active accent/typography.
+-- change so the sheen always matches the active typography.
 --
 -- options = {
---     band     = 0.16,  -- sheen width, in label widths (~2 glyphs)
+--     band     = 0.4,   -- highlight width, in label widths (~3 glyphs)
 --     period   = 2.4,   -- seconds for one full sweep
 --     pause    = 0.9,   -- seconds to rest before sweeping again
 --     rotation = 0      -- gradient angle (0 = horizontal)
@@ -544,7 +553,7 @@ function Util:animate_wordmark(label, options)
     if not label then return noop end
     options = options or {}
 
-    local band     = math.clamp(tonumber(options.band) or 0.16, 0.04, 0.5)
+    local band     = math.clamp(tonumber(options.band) or 0.4, 0.12, 0.6)
     local period   = math.max(0.4, tonumber(options.period) or 2.4)
     local pause    = math.max(0, tonumber(options.pause) or 0.9)
     local rotation = tonumber(options.rotation) or 0
@@ -555,26 +564,26 @@ function Util:animate_wordmark(label, options)
 
     local lo = 0.5 - band * 0.5
     local hi = 0.5 + band * 0.5
-    local edge = band * 0.28
 
     local function palette()
         local text = Theme.Text
-        local dark = mix_color(text, Color3.fromRGB(0, 0, 0), 0.78)
-        local bright = mix_color(text, Color3.fromRGB(255, 255, 255), 0.72)
+        -- Resting glyphs are dimmed toward black so the white highlight band
+        -- is clearly visible as it sweeps; a near-white resting colour would
+        -- hide the shine entirely on the dark panel.
+        local base = mix_color(text, Color3.fromRGB(0, 0, 0), 0.45)
+        local bright = mix_color(text, Color3.fromRGB(255, 255, 255), 0.95)
         return ColorSequence.new({
-            ColorSequenceKeypoint.new(0.00, text),
-            ColorSequenceKeypoint.new(lo, text),
-            ColorSequenceKeypoint.new(lo + edge, dark),
+            ColorSequenceKeypoint.new(0.00, base),
+            ColorSequenceKeypoint.new(lo, base),
             ColorSequenceKeypoint.new(0.50, bright),
-            ColorSequenceKeypoint.new(hi - edge, dark),
-            ColorSequenceKeypoint.new(hi, text),
-            ColorSequenceKeypoint.new(1.00, text)
+            ColorSequenceKeypoint.new(hi, base),
+            ColorSequenceKeypoint.new(1.00, base)
         })
     end
 
-    -- Travel the notch from fully off the left edge to fully off the right edge
-    -- before resetting, so the loop never snaps a half-visible sheen across the
-    -- word; the pause then reads as a natural gap between passes.
+    -- Travel the highlight from fully off the left edge to fully off the right
+    -- edge before resetting, so the loop never snaps a half-visible sheen
+    -- across the word; the pause then reads as a natural gap between passes.
     local from = -hi
     local to = 1 - lo
 
@@ -1176,6 +1185,7 @@ function Library.create_loader(self, settings)
     local rng = Random.new()
     local particles_alive = true
     local closed = false
+    local finished = false
     local auto_running = false
 
     local gui = create('ScreenGui', {
@@ -1371,7 +1381,9 @@ function Library.create_loader(self, settings)
 
     local brand = create('TextLabel', {
         Name = 'Brand',
-        Size = UDim2.new(0.6, 0, 1, 0),
+        -- Hug the text so the wordmark gradient spans the glyphs exactly.
+        Size = UDim2.new(0, 0, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.X,
         BackgroundTransparency = 1,
         FontFace = font(Enum.FontWeight.Bold),
         TextColor3 = Theme.Text,
@@ -1746,6 +1758,34 @@ function Library.create_loader(self, settings)
         add_status(text)
     end
 
+    -- Block the calling thread until the loader has fully closed (fade-out,
+    -- teardown and completion callback included). `library:load()` uses this
+    -- so the interface is never revealed behind the loading card, and scripts
+    -- can call it directly to gate their own setup work.
+    --
+    -- `timeout` (seconds) bounds the wait so a manual loader that is never
+    -- closed cannot hang the script forever. Returns true if the loader
+    -- finished, false if the wait timed out.
+    --
+    -- The isyieldable() guard keeps a call from a non-yieldable context (or a
+    -- bare command bar) from spinning forever; in a normal Roblox script the
+    -- thread is always yieldable, so it really waits.
+    function loader:wait(timeout)
+        if not (coroutine and coroutine.isyieldable and coroutine.isyieldable()) then
+            return finished
+        end
+        timeout = tonumber(timeout)
+        local waited = 0
+        while not finished do
+            if timeout and timeout > 0 and waited >= timeout then
+                return false
+            end
+            local delta = task.wait(0.03) or 0.03
+            waited = waited + delta
+        end
+        return true
+    end
+
     -- Idempotent close: teardown happens once, and an explicit override
     -- callback still fires even if the loader already closed itself.
     function loader:close(override_callback)
@@ -1781,6 +1821,9 @@ function Library.create_loader(self, settings)
 
         local callback = override_callback or settings.callback
         if callback then callback() end
+        -- Set last: `wait()` returns only once the callback has run, so callers
+        -- that gate on the loader see a fully torn-down screen.
+        finished = true
     end
 
     -- Opening state
@@ -1825,6 +1868,14 @@ function Library.create_loader(self, settings)
         end)
     end
 
+    -- Track the active loader on the library so `load()` can gate on it.
+    if self and self._ui then self._loader = loader end
+    -- Optional full-script gate: `wait = true` blocks here until the loader
+    -- has closed. `library:load()` already waits for the reveal, so this is
+    -- only needed to hold everything else in the script too.
+    if settings.wait == true then
+        loader:wait(tonumber(Library.Loader_Timeout))
+    end
     return loader
 end
 
@@ -1850,6 +1901,16 @@ Library.Acrylic = false
 
 Library.Logo_Animation = 'Stellar' -- 'Stellar' | 'Ethereal' | sheet table | false
 Library.Logo = nil                 -- set to an asset id to use a static image
+
+-- Badge next to the product name. Change it per build/version with
+-- `Library.Edition = 'V2.1'` before `Library.new()`, or at runtime with
+-- `library:set_edition('V2.1')`.
+Library.Edition = 'ETHEREAL'
+
+-- Safety bound (seconds) on how long `library:load()` will wait for a loader
+-- before revealing the window anyway. Auto loaders close themselves long
+-- before this; it only matters if a manual loader is never closed.
+Library.Loader_Timeout = 30
 
 Library._choosing_keybind = false
 Library._device = nil
@@ -1893,6 +1954,8 @@ function Library.new()
         _search_text = '',
         _open_dropdown = nil,
         _status_token = 0,
+        _edition = tostring(Library.Edition or 'ETHEREAL'),
+        _loader = nil,
         _dragging = false,
         _drag_start = nil,
         _container_position = nil,
@@ -2004,6 +2067,38 @@ function Library:set_accent(color)
     Theme.Accent_Soft = Color3.new(color.R * 0.24, color.G * 0.24, color.B * 0.3)
     Theme_Name = 'Custom'
     apply_theme()
+    return true
+end
+
+--=====================================================================
+--  Edition badge
+--  The chip beside the product name is a free-form build/version string:
+--      library:set_edition('ETHEREAL v2.1')
+--      library:set_edition('BETA')
+--      library:set_edition('ETHEREAL', '2.1')  -- -> "ETHEREAL 2.1"
+--  It resizes to fit whatever text it is given.
+--=====================================================================
+function Library:get_edition()
+    return self._edition or tostring(Library.Edition or 'ETHEREAL')
+end
+
+function Library:set_edition(text, version)
+    if text == nil then return false end
+    text = tostring(text)
+    if text == '' then text = 'ETHEREAL' end
+    if version ~= nil and tostring(version) ~= '' then
+        text = text .. ' ' .. tostring(version)
+    end
+    self._edition = text
+
+    local refs = self._refs
+    if refs and refs.EditionLabel and refs.EditionLabel.Parent then
+        refs.EditionLabel.Text = text
+        if refs.Edition and refs.Edition.Parent then
+            refs.Edition.Size = UDim2.fromOffset(edition_badge_width(text), 15)
+        end
+    end
+    self:status('Edition: ' .. text, 'action')
     return true
 end
 
@@ -2210,7 +2305,11 @@ function Library:create_ui()
         TextSize = 14,
         TextXAlignment = Enum.TextXAlignment.Left,
         Text = 'Stellar',
-        Size = UDim2.fromOffset(120, 16),
+        -- Hug the text so the wordmark gradient spans the glyphs exactly; a
+        -- fixed-width box made the highlight spend most of its sweep off the
+        -- letters, which is why it barely read as a moving shine.
+        Size = UDim2.new(0, 0, 0, 16),
+        AutomaticSize = Enum.AutomaticSize.X,
         Position = UDim2.fromOffset(56, 10),
         ZIndex = 3
     }, TopBar)
@@ -2218,9 +2317,10 @@ function Library:create_ui()
     -- across the window chrome and the loading card.
     Util:animate_wordmark(Product, { period = 2.8, pause = 1.1 })
 
+    local edition_text = tostring(Library.Edition or 'ETHEREAL')
     local Edition = create('Frame', {
         Name = 'Edition',
-        Size = UDim2.fromOffset(58, 15),
+        Size = UDim2.fromOffset(edition_badge_width(edition_text), 15),
         Position = UDim2.fromOffset(56, 27),
         BackgroundColor3 = Theme.Accent_Soft,
         BorderSizePixel = 0,
@@ -2235,7 +2335,8 @@ function Library:create_ui()
         FontFace = font(Enum.FontWeight.Bold),
         TextColor3 = Theme.Accent,
         TextSize = 8,
-        Text = 'ETHEREAL',
+        Text = edition_text,
+        TextXAlignment = Enum.TextXAlignment.Center,
         ZIndex = 4
     }, Edition)
     bind(EditionLabel, 'TextColor3', 'Accent')
@@ -2646,6 +2747,8 @@ function Library:create_ui()
         LogoMark = LogoMark,
         LogoImage = LogoImage,
         Product = Product,
+        Edition = Edition,
+        EditionLabel = EditionLabel,
         Close = Close,
         WIN_W = WIN_W,
         WIN_H = WIN_H
@@ -2761,6 +2864,14 @@ function Library:create_ui()
     end
 
     function self:load()
+        -- Hold the reveal until any active loader has finished. Without this
+        -- the window faded in behind the loading card while it was still
+        -- running, which looked like the loader had been skipped.
+        if self._loader then
+            self._loader:wait(tonumber(Library.Loader_Timeout))
+            self._loader = nil
+        end
+
         local images = {}
         for _, object in ipairs(Stellar:GetDescendants()) do
             if object:IsA('ImageLabel') and object.Image ~= '' then
