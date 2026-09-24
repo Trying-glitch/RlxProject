@@ -1086,24 +1086,8 @@ function Library.create_loader(self, settings)
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     }, CoreGui)
 
-    local backdrop = create('Frame', {
-        Name = 'Backdrop',
-        Size = UDim2.new(1, 4, 1, 4),
-        Position = UDim2.fromScale(0.5, 0.5),
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = settings.backdrop_color or Color3.fromRGB(7, 8, 11),
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        ZIndex = 0
-    }, gui)
-
-    if settings.dim_background ~= false then
-        tween(backdrop, 0.45, { BackgroundTransparency = settings.backdrop_transparency or 0.04 })
-    end
-
-    -- Ambient "sky" weather behind the UI: rain streaks or slow snow drifting
-    -- down the whole viewport, rather than dust rising from the centre.
-    -- `settings.weather` accepts 'rain' | 'snow' | false.
+    -- The weather is the *only* full-screen element. Everything else lives on
+    -- the floating card below, so the loader never blacks out the viewport.
     local particle_layer = create('Frame', {
         Name = 'ParticleLayer',
         Size = UDim2.fromScale(1, 1),
@@ -1194,26 +1178,104 @@ function Library.create_loader(self, settings)
     for _ = 1, weather_count do spawn_weather_particle() end
 
     -- ------------------------------------------------------------------
-    --  Header: brand on the left, wall clock + elapsed on the right
+    --  Floating card: brand + clock, status checklist, animated mark,
+    --  progress (ETA left / percent right) and the bottom quote.
+    --  Deliberately NOT a full-screen panel — only the weather spans the
+    --  viewport.
     -- ------------------------------------------------------------------
-    local header = create('Frame', {
-        Name = 'Header',
-        Size = UDim2.new(1, 0, 0, 44),
-        -- Generous top inset so the brand/clock clear the phone status bar
-        -- (the ScreenGui ignores the GUI inset to cover the whole screen).
-        Position = UDim2.fromOffset(0, 42),
+    -- Tall enough that a full 5-row status list still clears the pinned quote.
+    local CARD_W, CARD_H = 520, 380
+    local PAD = 22
+
+    local card = create('CanvasGroup', {
+        Name = 'LoaderCard',
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(CARD_W, CARD_H),
+        BackgroundColor3 = Theme.Panel,
+        BackgroundTransparency = 0,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        GroupTransparency = 1,
+        ZIndex = 2
+    }, gui)
+    corner(card, 16)
+    local card_stroke = stroke(card, Theme.Border, 1, 0.25)
+    bind(card, 'BackgroundColor3', 'Panel')
+    bind(card_stroke, 'Color', 'Border')
+
+    -- Top accent hairline, matching the main window.
+    local accent_line = create('Frame', {
+        Name = 'AccentLine',
+        Size = UDim2.new(1, 0, 0, 1),
+        BackgroundColor3 = Theme.Accent,
+        BorderSizePixel = 0,
+        ZIndex = 6
+    }, card)
+    gradient(accent_line, ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Theme.Accent),
+        ColorSequenceKeypoint.new(0.5, Theme.Accent_2),
+        ColorSequenceKeypoint.new(1, Theme.Accent)
+    }), 0, NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1),
+        NumberSequenceKeypoint.new(0.5, 0),
+        NumberSequenceKeypoint.new(1, 1)
+    }))
+    bind_fn(function()
+        accent_line.BackgroundColor3 = Theme.Accent
+    end)
+
+    -- Responsive scaling so the card never looks oversized on a phone or
+    -- tiny on a large display.
+    local scale = create('UIScale', {}, card)
+    local function update_scale()
+        local camera = Workspace.CurrentCamera
+        if camera then
+            local viewport = camera.ViewportSize
+            scale.Scale = math.clamp(
+                math.min(viewport.X / (CARD_W + 120), viewport.Y / (CARD_H + 120)),
+                0.62, 1.15
+            )
+        end
+    end
+    update_scale()
+    local scale_connection
+    local camera = Workspace.CurrentCamera
+    if camera then
+        scale_connection = camera:GetPropertyChangedSignal('ViewportSize'):Connect(update_scale)
+    end
+
+    local container = create('Frame', {
+        Name = 'LoaderContainer',
+        Size = UDim2.new(1, -PAD * 2, 1, -PAD * 2),
+        Position = UDim2.fromOffset(PAD, PAD),
         BackgroundTransparency = 1,
         ZIndex = 3
-    }, gui)
+    }, card)
+    list_layout(container, {
+        FillDirection = Enum.FillDirection.Vertical,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        VerticalAlignment = Enum.VerticalAlignment.Top,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 12)
+    })
+
+    -- Header: brand on the left, "07:31 PM · 00s" on the right.
+    local header = create('Frame', {
+        Name = 'Header',
+        LayoutOrder = 1,
+        Size = UDim2.new(1, 0, 0, 30),
+        BackgroundTransparency = 1,
+        ZIndex = 3
+    }, container)
 
     local brand = create('TextLabel', {
         Name = 'Brand',
-        Size = UDim2.fromOffset(260, 30),
-        Position = UDim2.fromOffset(32, 0),
+        Size = UDim2.new(0.6, 0, 1, 0),
         BackgroundTransparency = 1,
         FontFace = font(Enum.FontWeight.Bold),
         TextColor3 = Theme.Text,
-        TextSize = 21,
+        TextSize = 20,
         Text = settings.brand or 'Stellar.',
         TextXAlignment = Enum.TextXAlignment.Left,
         TextTransparency = 1,
@@ -1223,13 +1285,14 @@ function Library.create_loader(self, settings)
 
     local clock = create('TextLabel', {
         Name = 'Clock',
-        Size = UDim2.fromOffset(120, 18),
-        Position = UDim2.new(1, -212, 0, 3),
+        Size = UDim2.fromOffset(96, 20),
+        Position = UDim2.new(1, -42, 0.5, 0),
+        AnchorPoint = Vector2.new(1, 0.5),
         BackgroundTransparency = 1,
         FontFace = body_font(Enum.FontWeight.Medium),
         TextColor3 = Theme.Muted,
         TextSize = 13,
-        Text = '',
+        Text = '--:-- -- ·',
         TextXAlignment = Enum.TextXAlignment.Right,
         TextTransparency = 1,
         ZIndex = 3
@@ -1238,8 +1301,9 @@ function Library.create_loader(self, settings)
 
     local elapsed = create('TextLabel', {
         Name = 'Elapsed',
-        Size = UDim2.fromOffset(60, 18),
-        Position = UDim2.new(1, -92, 0, 3),
+        Size = UDim2.fromOffset(42, 20),
+        Position = UDim2.new(1, 0, 0.5, 0),
+        AnchorPoint = Vector2.new(1, 0.5),
         BackgroundTransparency = 1,
         FontFace = body_font(Enum.FontWeight.Regular),
         TextColor3 = Theme.Dim,
@@ -1251,159 +1315,32 @@ function Library.create_loader(self, settings)
     }, header)
     bind(elapsed, 'TextColor3', 'Dim')
 
-    -- ------------------------------------------------------------------
-    --  Centre stack: animated mark, status list, progress, percentage
-    -- ------------------------------------------------------------------
-    local container = create('Frame', {
-        Name = 'LoaderContainer',
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        Position = UDim2.fromScale(0.5, 0.47),
-        Size = UDim2.fromOffset(460, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1,
-        ZIndex = 2
-    }, gui)
-    list_layout(container, {
-        FillDirection = Enum.FillDirection.Vertical,
-        HorizontalAlignment = Enum.HorizontalAlignment.Left,
-        VerticalAlignment = Enum.VerticalAlignment.Top,
-        Padding = UDim.new(0, 16)
-    })
-
-    -- Responsive scaling so the loader never looks oversized on a phone or
-    -- tiny on a large display.
-    local scale = create('UIScale', {}, container)
-    local function update_scale()
-        local camera = Workspace.CurrentCamera
-        if camera then
-            local viewport = camera.ViewportSize
-            -- Fit both axes so the stack never crowds the header or quote on
-            -- short/landscape phones.
-            scale.Scale = math.clamp(math.min(viewport.X / 1280, viewport.Y / 760), 0.62, 1.4)
-        end
-    end
-    update_scale()
-    local scale_connection
-    local camera = Workspace.CurrentCamera
-    if camera then
-        scale_connection = camera:GetPropertyChangedSignal('ViewportSize'):Connect(update_scale)
-    end
-
-    local logo_holder = create('Frame', {
-        Name = 'LogoHolder',
-        LayoutOrder = 1,
-        Size = UDim2.new(1, 0, 0, 116),
-        BackgroundTransparency = 1,
-        ZIndex = 2
-    }, container)
-
-    local glow = create('Frame', {
-        Name = 'Glow',
-        Size = UDim2.fromOffset(104, 104),
-        Position = UDim2.fromScale(0.5, 0.5),
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = accent,
-        BackgroundTransparency = 0.9,
+    local divider = create('Frame', {
+        Name = 'Divider',
+        Size = UDim2.new(1, 0, 0, 1),
+        Position = UDim2.new(0, 0, 1, 0),
+        BackgroundColor3 = Theme.Border,
+        BackgroundTransparency = 0.5,
         BorderSizePixel = 0,
-        ZIndex = 1
-    }, logo_holder)
-    corner(glow, 0, 1)
-
-    local logo_bg = create('Frame', {
-        Name = 'LogoMark',
-        Size = UDim2.fromOffset(82, 82),
-        Position = UDim2.fromScale(0.5, 0.5),
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = accent,
-        BorderSizePixel = 0,
-        ZIndex = 2
-    }, logo_holder)
-    corner(logo_bg, 24)
-    accent_gradient(logo_bg, 135)
-    local logo_scale = create('UIScale', { Scale = 0.4 }, logo_bg)
-
-    -- Thin accent arc that orbits the mark. A transparent gradient on the
-    -- stroke makes it read as a spinner rather than a static ring.
-    local ring = create('Frame', {
-        Name = 'Ring',
-        Size = UDim2.fromOffset(94, 94),
-        Position = UDim2.fromScale(0.5, 0.5),
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundTransparency = 1,
-        Rotation = 0,
         ZIndex = 3
-    }, logo_holder)
-    corner(ring, 0, 1)
-    local ring_stroke = create('UIStroke', {
-        Color = accent,
-        Thickness = 2,
-        Transparency = 0.3,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    }, ring)
-    gradient(ring_stroke, ColorSequence.new({
-        ColorSequenceKeypoint.new(0, accent),
-        ColorSequenceKeypoint.new(1, accent)
-    }), 0, NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0),
-        NumberSequenceKeypoint.new(0.5, 0.9),
-        NumberSequenceKeypoint.new(1, 0)
-    }))
+    }, header)
+    bind(divider, 'BackgroundColor3', 'Border')
 
-    local ring_angle = 0
-    task.spawn(function()
-        while not closed and ring and ring.Parent do
-            ring_angle = ring_angle + 360
-            tween(ring, 2.4, { Rotation = ring_angle }, Enum.EasingStyle.Linear)
-            task.wait(2.4)
-        end
-    end)
-
-    local logo_image = create('ImageLabel', {
-        Name = 'Logo',
-        Size = UDim2.fromOffset(50, 50),
-        Position = UDim2.fromScale(0.5, 0.5),
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundTransparency = 1,
-        ImageColor3 = Color3.fromRGB(255, 255, 255),
-        ImageTransparency = 1,
-        ScaleType = Enum.ScaleType.Fit,
-        ZIndex = 3
-    }, logo_bg)
-    local stop_logo = Util:apply_logo(logo_image, {
-        animation = settings.animation or Library.Logo_Animation,
-        image = settings.logo
-    })
-
-    -- Pop the mark in with a little overshoot.
-    tween(logo_image, 0.6, { ImageTransparency = 0 }, Enum.EasingStyle.Back)
-    tween(logo_scale, 0.6, { Scale = 1 }, Enum.EasingStyle.Back)
-
-    -- Keep the glow breathing while the loader is alive.
-    task.spawn(function()
-        while not closed and glow and glow.Parent do
-            tween(glow, 1.8, { BackgroundTransparency = 0.78, Size = UDim2.fromOffset(116, 116) }, Enum.EasingStyle.Sine)
-            task.wait(1.8)
-            if closed or not (glow and glow.Parent) then break end
-            tween(glow, 1.8, { BackgroundTransparency = 0.92, Size = UDim2.fromOffset(100, 100) }, Enum.EasingStyle.Sine)
-            task.wait(1.8)
-        end
-    end)
-
-    -- Live status list: each stage is a row with a leading indicator. The
-    -- active row shows a small spinner ("/"), completed rows a tick.
+    -- Live status checklist, left aligned. Every row is "> text"; the active
+    -- row shows a trailing spinner, completed rows just dim.
     local status_list = create('Frame', {
         Name = 'StatusList',
         LayoutOrder = 2,
         Size = UDim2.new(1, 0, 0, 0),
         AutomaticSize = Enum.AutomaticSize.Y,
         BackgroundTransparency = 1,
-        ZIndex = 2
+        ZIndex = 3
     }, container)
     list_layout(status_list, {
         FillDirection = Enum.FillDirection.Vertical,
         HorizontalAlignment = Enum.HorizontalAlignment.Left,
         SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, 8)
+        Padding = UDim.new(0, 6)
     })
 
     local status_entries = {}
@@ -1416,26 +1353,25 @@ function Library.create_loader(self, settings)
             LayoutOrder = #status_entries + 1,
             Size = UDim2.new(1, 0, 0, 18),
             BackgroundTransparency = 1,
-            ZIndex = 2
+            ZIndex = 3
         }, status_list)
 
-        local icon = create('TextLabel', {
+        local marker = create('TextLabel', {
             Name = 'Icon',
-            Size = UDim2.fromOffset(16, 18),
-            Position = UDim2.fromOffset(0, 0),
+            Size = UDim2.fromOffset(14, 18),
             BackgroundTransparency = 1,
             FontFace = font(Enum.FontWeight.Bold),
             TextColor3 = Theme.Accent,
             TextSize = 13,
-            Text = '/',
+            Text = '>',
             TextXAlignment = Enum.TextXAlignment.Left,
-            ZIndex = 3
+            ZIndex = 4
         }, row)
 
         local label = create('TextLabel', {
             Name = 'Label',
-            Size = UDim2.new(1, -24, 1, 0),
-            Position = UDim2.fromOffset(24, 0),
+            Size = UDim2.new(1, -44, 1, 0),
+            Position = UDim2.fromOffset(15, 0),
             BackgroundTransparency = 1,
             FontFace = body_font(Enum.FontWeight.Medium),
             TextColor3 = Theme.Text,
@@ -1443,19 +1379,32 @@ function Library.create_loader(self, settings)
             Text = tostring(text),
             TextXAlignment = Enum.TextXAlignment.Left,
             TextTransparency = 1,
-            ZIndex = 3
+            ZIndex = 4
         }, row)
 
-        return { row = row, icon = icon, label = label }
+        local spin = create('TextLabel', {
+            Name = 'Spinner',
+            Size = UDim2.fromOffset(16, 18),
+            Position = UDim2.new(1, -16, 0, 0),
+            BackgroundTransparency = 1,
+            FontFace = font(Enum.FontWeight.Bold),
+            TextColor3 = Theme.Accent,
+            TextSize = 13,
+            Text = '/',
+            TextXAlignment = Enum.TextXAlignment.Right,
+            Visible = false,
+            ZIndex = 4
+        }, row)
+
+        return { row = row, icon = marker, label = label, spinner = spin }
     end
 
     local function finish_active()
         local entry = active_entry
         if not entry then return end
         active_entry = nil
-        if entry.icon and entry.icon.Parent then
-            entry.icon.Text = '✓'
-            entry.icon.TextColor3 = Theme.Success
+        if entry.spinner and entry.spinner.Parent then
+            entry.spinner.Visible = false
         end
         if entry.label and entry.label.Parent then
             entry.label.TextColor3 = Theme.Dim
@@ -1468,6 +1417,9 @@ function Library.create_loader(self, settings)
         entry.active = true
         active_entry = entry
         table.insert(status_entries, entry)
+        if entry.spinner and entry.spinner.Parent then
+            entry.spinner.Visible = true
+        end
         tween(entry.label, 0.3, { TextTransparency = 0 })
         if #status_entries > max_status then
             local oldest = table.remove(status_entries, 1)
@@ -1481,33 +1433,145 @@ function Library.create_loader(self, settings)
         local index = 1
         while not closed do
             local entry = active_entry
-            if entry and entry.icon and entry.icon.Parent then
-                entry.icon.Text = spinner_frames[index]
-                entry.icon.TextColor3 = Theme.Accent
+            if entry and entry.spinner and entry.spinner.Parent then
+                entry.spinner.Text = spinner_frames[index]
             end
             index = (index % #spinner_frames) + 1
             task.wait(0.12)
         end
     end)
 
-    -- Progress bar with a live ETA on the right and a leading knob.
-    local progress_row = create('Frame', {
-        Name = 'ProgressRow',
+    -- Centre row: a rotating accent arc next to the animated sprite. The arc
+    -- only *rotates* (never scales) and the sprite just cycles its frames, so
+    -- there is no expanding / blooming icon animation.
+    local mark_row = create('Frame', {
+        Name = 'MarkRow',
         LayoutOrder = 3,
+        Size = UDim2.new(1, 0, 0, 84),
+        BackgroundTransparency = 1,
+        ZIndex = 3
+    }, container)
+
+    local mark_group = create('Frame', {
+        Name = 'MarkGroup',
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        Size = UDim2.fromOffset(150, 84),
+        BackgroundTransparency = 1,
+        ZIndex = 3
+    }, mark_row)
+
+    local ring = create('Frame', {
+        Name = 'Ring',
+        Size = UDim2.fromOffset(66, 66),
+        Position = UDim2.new(0, 0, 0.5, 0),
+        AnchorPoint = Vector2.new(0, 0.5),
+        BackgroundTransparency = 1,
+        Rotation = 0,
+        ZIndex = 4
+    }, mark_group)
+    corner(ring, 0, 1)
+    local ring_stroke = create('UIStroke', {
+        Color = accent,
+        Thickness = 2,
+        Transparency = 0.25,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    }, ring)
+    gradient(ring_stroke, ColorSequence.new(accent), 0, NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(0.55, 0.85),
+        NumberSequenceKeypoint.new(1, 0)
+    }))
+
+    local ring_angle = 0
+    task.spawn(function()
+        while not closed and ring and ring.Parent do
+            ring_angle = ring_angle + 360
+            tween(ring, 2.2, { Rotation = ring_angle }, Enum.EasingStyle.Linear)
+            task.wait(2.2)
+        end
+    end)
+
+    local logo_bg = create('Frame', {
+        Name = 'LogoMark',
+        Size = UDim2.fromOffset(64, 64),
+        Position = UDim2.new(1, 0, 0.5, 0),
+        AnchorPoint = Vector2.new(1, 0.5),
+        BackgroundColor3 = Theme.Panel_2,
+        BorderSizePixel = 0,
+        ZIndex = 4
+    }, mark_group)
+    corner(logo_bg, 18)
+    local logo_stroke = stroke(logo_bg, Theme.Border, 1, 0.4)
+    bind(logo_bg, 'BackgroundColor3', 'Panel_2')
+    bind(logo_stroke, 'Color', 'Border')
+
+    local logo_image = create('ImageLabel', {
+        Name = 'Logo',
+        Size = UDim2.fromOffset(46, 46),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+        ImageColor3 = Color3.fromRGB(255, 255, 255),
+        ImageTransparency = 1,
+        ScaleType = Enum.ScaleType.Fit,
+        ZIndex = 5
+    }, logo_bg)
+    local stop_logo = Util:apply_logo(logo_image, {
+        animation = settings.animation or Library.Logo_Animation,
+        image = settings.logo
+    })
+    -- Simple fade in — no overshoot, no scale.
+    tween(logo_image, 0.45, { ImageTransparency = 0 })
+
+    -- Progress meta: ETA stamp on the left, percentage on the right.
+    local meta_row = create('Frame', {
+        Name = 'ProgressMeta',
+        LayoutOrder = 4,
         Size = UDim2.new(1, 0, 0, 16),
         BackgroundTransparency = 1,
-        ZIndex = 2
+        ZIndex = 3
     }, container)
+
+    local eta = create('TextLabel', {
+        Name = 'Eta',
+        Size = UDim2.fromOffset(120, 16),
+        Position = UDim2.fromOffset(0, 0),
+        AnchorPoint = Vector2.new(0, 0),
+        BackgroundTransparency = 1,
+        FontFace = body_font(Enum.FontWeight.Medium),
+        TextColor3 = Theme.Muted,
+        TextSize = 12,
+        Text = '00:00',
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 3
+    }, meta_row)
+    bind(eta, 'TextColor3', 'Muted')
+
+    local percent = create('TextLabel', {
+        Name = 'Percent',
+        Size = UDim2.fromOffset(120, 16),
+        Position = UDim2.new(1, 0, 0, 0),
+        AnchorPoint = Vector2.new(1, 0),
+        BackgroundTransparency = 1,
+        FontFace = font(Enum.FontWeight.Bold),
+        TextColor3 = Theme.Text,
+        TextSize = 13,
+        Text = '0%',
+        TextXAlignment = Enum.TextXAlignment.Right,
+        ZIndex = 3
+    }, meta_row)
+    bind(percent, 'TextColor3', 'Text')
 
     local bar = create('Frame', {
         Name = 'ProgressTrack',
-        Size = UDim2.new(1, -64, 0, 4),
-        Position = UDim2.fromOffset(0, 6),
+        LayoutOrder = 5,
+        Size = UDim2.new(1, 0, 0, 5),
         BackgroundColor3 = Theme.Panel_3,
         BorderSizePixel = 0,
-        ZIndex = 2
-    }, progress_row)
-    corner(bar, 2)
+        ZIndex = 3
+    }, container)
+    corner(bar, 3)
     bind(bar, 'BackgroundColor3', 'Panel_3')
 
     local fill = create('Frame', {
@@ -1516,9 +1580,9 @@ function Library.create_loader(self, settings)
         BackgroundColor3 = accent,
         BorderSizePixel = 0,
         ClipsDescendants = true,
-        ZIndex = 3
+        ZIndex = 4
     }, bar)
-    corner(fill, 2)
+    corner(fill, 3)
     accent_gradient(fill, 0)
 
     -- Highlight that sweeps across the fill as it grows.
@@ -1529,7 +1593,7 @@ function Library.create_loader(self, settings)
         BackgroundColor3 = Color3.fromRGB(255, 255, 255),
         BackgroundTransparency = 0.55,
         BorderSizePixel = 0,
-        ZIndex = 4
+        ZIndex = 5
     }, fill)
     gradient(shimmer, ColorSequence.new(Color3.fromRGB(255, 255, 255)), 0, NumberSequence.new({
         NumberSequenceKeypoint.new(0, 1),
@@ -1552,95 +1616,27 @@ function Library.create_loader(self, settings)
         AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Color3.fromRGB(255, 255, 255),
         BorderSizePixel = 0,
-        ZIndex = 5
+        ZIndex = 6
     }, bar)
     corner(knob, 0, 1)
 
-    local eta = create('TextLabel', {
-        Name = 'Eta',
-        Size = UDim2.fromOffset(56, 14),
-        Position = UDim2.new(1, -56, 0, 1),
-        BackgroundTransparency = 1,
-        FontFace = body_font(Enum.FontWeight.Medium),
-        TextColor3 = Theme.Muted,
-        TextSize = 11,
-        Text = '00:00',
-        TextXAlignment = Enum.TextXAlignment.Right,
-        ZIndex = 3
-    }, progress_row)
-    bind(eta, 'TextColor3', 'Muted')
-
-    local percent = create('TextLabel', {
-        Name = 'Percent',
-        LayoutOrder = 4,
-        Size = UDim2.new(1, 0, 0, 22),
-        BackgroundTransparency = 1,
-        FontFace = font(Enum.FontWeight.Bold),
-        TextColor3 = Theme.Text,
-        TextSize = 15,
-        Text = '0%',
-        TextXAlignment = Enum.TextXAlignment.Left,
-        ZIndex = 2
-    }, container)
-    bind(percent, 'TextColor3', 'Text')
-
+    -- Quote pinned to the bottom of the card.
     local quote = create('TextLabel', {
         Name = 'Quote',
-        Size = UDim2.new(1, -80, 0, 16),
-        Position = UDim2.new(0.5, 0, 1, -24),
-        AnchorPoint = Vector2.new(0.5, 1),
+        Size = UDim2.new(1, -PAD * 2, 0, 16),
+        Position = UDim2.new(0, PAD, 1, -PAD),
+        AnchorPoint = Vector2.new(0, 1),
         BackgroundTransparency = 1,
         FontFace = body_font(Enum.FontWeight.Regular),
         TextColor3 = Theme.Dim,
         TextSize = 12,
         Text = settings.quote or "Do what you want. We can judge you — just don't get caught.",
-        TextXAlignment = Enum.TextXAlignment.Center,
+        TextXAlignment = Enum.TextXAlignment.Left,
         TextTruncate = Enum.TextTruncate.AtEnd,
         TextTransparency = 1,
         ZIndex = 3
-    }, gui)
+    }, card)
     bind(quote, 'TextColor3', 'Dim')
-
-    -- Stage text crossfade is no longer needed (the list keeps history), but
-    -- the bloom still marks each cleared stage.
-    local bloom_base = 1
-    local bloom_peak = tonumber(settings.bloom_scale) or 1.35
-    local bloom_duration = tonumber(settings.bloom_duration) or 0.5
-    local function bloom_to_stage(index)
-        if not (logo_scale and logo_scale.Parent) then return end
-        local alpha = math.clamp(index / math.max(#stages, 1), 0, 1)
-        local target = bloom_base + (bloom_peak - bloom_base) * alpha
-        tween(logo_scale, bloom_duration, { Scale = target }, Enum.EasingStyle.Back)
-    end
-
-    -- Completion burst radiating from the mark.
-    local bursted = false
-    local function burst()
-        if bursted then return end
-        bursted = true
-        for _ = 1, 16 do
-            local dot = create('Frame', {
-                AnchorPoint = Vector2.new(0.5, 0.5),
-                Size = UDim2.fromOffset(rng:NextNumber(3, 6), rng:NextNumber(3, 6)),
-                Position = UDim2.fromScale(0.5, 0.5),
-                BackgroundColor3 = accent,
-                BorderSizePixel = 0,
-                ZIndex = 4
-            }, logo_holder)
-            corner(dot, 0, 1)
-
-            local angle = rng:NextNumber(0, math.pi * 2)
-            local distance = rng:NextNumber(26, 52)
-            tween(dot, rng:NextNumber(0.5, 0.85), {
-                Position = UDim2.new(0.5, math.cos(angle) * distance, 0.5, math.sin(angle) * distance),
-                BackgroundTransparency = 1
-            }, Enum.EasingStyle.Quad)
-            Debris:AddItem(dot, 1.2)
-        end
-        if logo_scale and logo_scale.Parent then
-            tween(logo_scale, 0.3, { Scale = bloom_peak * 1.12 }, Enum.EasingStyle.Back)
-        end
-    end
 
     local function format_clock()
         local ok, t = pcall(os.date, '*t')
@@ -1684,11 +1680,9 @@ function Library.create_loader(self, settings)
             finish_active()
             current_stage = index
             add_status(stages[index])
-            bloom_to_stage(index)
         end
         if alpha >= 1 then
             finish_active()
-            burst()
         end
     end
 
@@ -1718,17 +1712,13 @@ function Library.create_loader(self, settings)
         if scale_connection then scale_connection:Disconnect() end
         if stop_logo then stop_logo() end
 
-        -- The glow and the orbiting ring are circles; a UIStroke is not a
-        -- GuiObject so the fade loop below never touches it. Hide both
-        -- immediately, otherwise a lone blue circle lingers for the whole
-        -- close animation.
-        if glow then glow.Visible = false end
+        -- The arc is a circle drawn with a UIStroke, which is not a GuiObject,
+        -- so hide it immediately instead of relying on a fade loop. Otherwise
+        -- a lone circle lingers over the closing card.
         if ring then ring.Visible = false end
         if ring_stroke then ring_stroke.Transparency = 1 end
 
-        -- Fade the falling weather out with the backdrop, then hide the whole
-        -- layer. Without this the last drops would keep falling over the
-        -- closing panel and read as leftover artefacts.
+        -- Fade the falling weather out, then hide the layer.
         if particle_layer then
             for _, drop in ipairs(particle_layer:GetDescendants()) do
                 if drop:IsA('GuiObject') then
@@ -1740,23 +1730,9 @@ function Library.create_loader(self, settings)
             end)
         end
 
-        tween(backdrop, 0.4, { BackgroundTransparency = 1 })
-        tween(container, 0.3, { Position = UDim2.fromScale(0.5, 0.51) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-        for _, root in ipairs({ container, header, quote }) do
-            if root then
-                for _, descendant in ipairs(root:GetDescendants()) do
-                    if descendant:IsA('GuiObject') then
-                        tween(descendant, 0.26, { BackgroundTransparency = 1 })
-                    end
-                    if descendant:IsA('TextLabel') then
-                        tween(descendant, 0.26, { TextTransparency = 1 })
-                    end
-                    if descendant:IsA('ImageLabel') then
-                        tween(descendant, 0.26, { ImageTransparency = 1 })
-                    end
-                end
-            end
-        end
+        -- Fade the card as one group, then destroy the whole GUI.
+        tween(card, 0.28, { GroupTransparency = 1 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        tween(container, 0.28, { Position = UDim2.fromOffset(PAD, PAD + 6) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 
         task.wait(0.32)
         gui:Destroy()
@@ -1767,15 +1743,12 @@ function Library.create_loader(self, settings)
 
     -- Opening state
     add_status(stages[1])
-    clock.Text = format_clock()
+    clock.Text = format_clock() .. ' ·'
+    tween(card, 0.45, { GroupTransparency = 0 })
     tween(brand, 0.5, { TextTransparency = 0 })
     tween(clock, 0.5, { TextTransparency = 0 })
     tween(elapsed, 0.5, { TextTransparency = 0 })
-    task.delay(0.35, function()
-        if not closed and quote and quote.Parent then
-            tween(quote, 0.6, { TextTransparency = 0.45 })
-        end
-    end)
+    tween(quote, 0.6, { TextTransparency = 0.45 })
 
     local elapsed_seconds = 0
     task.spawn(function()
@@ -1783,7 +1756,7 @@ function Library.create_loader(self, settings)
             task.wait(1)
             if closed then break end
             elapsed_seconds = elapsed_seconds + 1
-            if clock and clock.Parent then clock.Text = format_clock() end
+            if clock and clock.Parent then clock.Text = format_clock() .. ' ·' end
             if elapsed and elapsed.Parent then elapsed.Text = elapsed_seconds .. 's' end
         end
     end)
