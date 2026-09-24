@@ -520,19 +520,21 @@ end
 
 -- Animated "wordmark" title (Discord-style).
 --
--- A UIGradient parented to a TextLabel tints the glyphs themselves, so we
--- author a dark → bright → dark sheen and sweep it across the letters. The
--- title therefore reads as a glossy fade-to-black wordmark rather than flat
--- text, and the highlight keeps travelling while the interface is open.
+-- A UIGradient parented to a TextLabel tints the glyphs themselves. The sheen
+-- is a *narrow* dark → bright → dark notch with the label's normal colour on
+-- either side, so only roughly two glyphs are shaded at any moment instead of
+-- half the title going black. The notch travels from just off the left edge to
+-- just off the right edge and then repeats, so the loop covers the whole word
+-- without a visible jump.
 --
 -- The label's own TextColor3 is forced to white so the gradient colours are
 -- shown exactly as authored, and the palette is re-authored on every theme
 -- change so the sheen always matches the active accent/typography.
 --
 -- options = {
---     sweep    = 0.6,   -- how far the gradient travels, in label widths
---     period   = 3.2,   -- seconds for one full sweep
---     pause    = 0.6,   -- seconds to rest before sweeping again
+--     band     = 0.16,  -- sheen width, in label widths (~2 glyphs)
+--     period   = 2.4,   -- seconds for one full sweep
+--     pause    = 0.9,   -- seconds to rest before sweeping again
 --     rotation = 0      -- gradient angle (0 = horizontal)
 -- }
 --
@@ -542,34 +544,47 @@ function Util:animate_wordmark(label, options)
     if not label then return noop end
     options = options or {}
 
-    local sweep    = tonumber(options.sweep) or 0.5
-    local period   = math.max(0.4, tonumber(options.period) or 3.2)
-    local pause    = math.max(0, tonumber(options.pause) or 0.6)
+    local band     = math.clamp(tonumber(options.band) or 0.16, 0.04, 0.5)
+    local period   = math.max(0.4, tonumber(options.period) or 2.4)
+    local pause    = math.max(0, tonumber(options.pause) or 0.9)
     local rotation = tonumber(options.rotation) or 0
 
     -- White base: the gradient is multiplied into the glyph colour, so this
     -- keeps the authored gradient exact instead of tinting it twice.
     label.TextColor3 = Color3.fromRGB(255, 255, 255)
 
+    local lo = 0.5 - band * 0.5
+    local hi = 0.5 + band * 0.5
+    local edge = band * 0.28
+
     local function palette()
         local text = Theme.Text
-        local dark = mix_color(text, Color3.fromRGB(0, 0, 0), 0.82)
-        local bright = mix_color(text, Color3.fromRGB(255, 255, 255), 0.75)
+        local dark = mix_color(text, Color3.fromRGB(0, 0, 0), 0.78)
+        local bright = mix_color(text, Color3.fromRGB(255, 255, 255), 0.72)
         return ColorSequence.new({
-            ColorSequenceKeypoint.new(0.00, dark),
-            ColorSequenceKeypoint.new(0.30, text),
+            ColorSequenceKeypoint.new(0.00, text),
+            ColorSequenceKeypoint.new(lo, text),
+            ColorSequenceKeypoint.new(lo + edge, dark),
             ColorSequenceKeypoint.new(0.50, bright),
-            ColorSequenceKeypoint.new(0.70, text),
-            ColorSequenceKeypoint.new(1.00, dark)
+            ColorSequenceKeypoint.new(hi - edge, dark),
+            ColorSequenceKeypoint.new(hi, text),
+            ColorSequenceKeypoint.new(1.00, text)
         })
     end
+
+    -- Travel the notch from fully off the left edge to fully off the right edge
+    -- before resetting, so the loop never snaps a half-visible sheen across the
+    -- word; the pause then reads as a natural gap between passes.
+    local from = -hi
+    local to = 1 - lo
 
     local grad = create('UIGradient', {
         Name = 'WordmarkGradient',
         Rotation = rotation,
-        Offset = Vector2.new(-sweep, 0),
+        Offset = Vector2.new(from, 0),
         Color = palette()
     }, label)
+    grad:SetAttribute('BandWidth', band)
 
     bind_fn(function()
         if grad and grad.Parent then
@@ -580,9 +595,11 @@ function Util:animate_wordmark(label, options)
     local stopped = false
     task.spawn(function()
         while not stopped and label and label.Parent and grad and grad.Parent do
-            grad.Offset = Vector2.new(-sweep, 0)
-            tween(grad, period, { Offset = Vector2.new(sweep, 0) }, Enum.EasingStyle.Sine)
-            task.wait(period + pause)
+            grad.Offset = Vector2.new(from, 0)
+            tween(grad, period, { Offset = Vector2.new(to, 0) }, Enum.EasingStyle.Sine)
+            task.wait(period)
+            if stopped then break end
+            task.wait(pause)
         end
     end)
 
@@ -1413,24 +1430,33 @@ function Library.create_loader(self, settings)
 
     -- Live status checklist, left aligned. Every row is "> text"; the active
     -- row shows a trailing spinner, completed rows just dim.
+    --
+    -- The list is a *fixed* height sized for the maximum number of rows. It
+    -- used to auto-size, which meant every new log line pushed the centred
+    -- mark (and the progress bar) down the card. Pinning the height keeps the
+    -- whole card still while the checklist fills in.
+    local STATUS_ROW_H, STATUS_ROW_GAP = 18, 6
+    local max_status = math.clamp(tonumber(settings.max_log_lines) or 5, 1, 5)
+    local status_h = max_status * STATUS_ROW_H + (max_status - 1) * STATUS_ROW_GAP
+
     local status_list = create('Frame', {
         Name = 'StatusList',
         LayoutOrder = 2,
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
+        Size = UDim2.new(1, 0, 0, status_h),
         BackgroundTransparency = 1,
+        ClipsDescendants = true,
         ZIndex = 3
     }, container)
     list_layout(status_list, {
         FillDirection = Enum.FillDirection.Vertical,
         HorizontalAlignment = Enum.HorizontalAlignment.Left,
+        VerticalAlignment = Enum.VerticalAlignment.Top,
         SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, 6)
+        Padding = UDim.new(0, STATUS_ROW_GAP)
     })
 
     local status_entries = {}
     local active_entry = nil
-    local max_status = math.max(1, tonumber(settings.max_log_lines) or 5)
 
     local function make_status_row(text)
         local row = create('Frame', {
@@ -1617,15 +1643,18 @@ function Library.create_loader(self, settings)
     }, meta_row)
     bind(percent, 'TextColor3', 'Text')
 
+    -- Simple rounded progress bar: a flat track with a solid accent fill.
+    -- Deliberately no leading knob (it read as a slider handle) and no shimmer.
     local bar = create('Frame', {
         Name = 'ProgressTrack',
         LayoutOrder = 5,
-        Size = UDim2.new(1, 0, 0, 5),
+        Size = UDim2.new(1, 0, 0, 7),
         BackgroundColor3 = Theme.Panel_3,
         BorderSizePixel = 0,
+        ClipsDescendants = true,
         ZIndex = 3
     }, container)
-    corner(bar, 3)
+    corner(bar, 4)
     bind(bar, 'BackgroundColor3', 'Panel_3')
 
     local fill = create('Frame', {
@@ -1636,43 +1665,8 @@ function Library.create_loader(self, settings)
         ClipsDescendants = true,
         ZIndex = 4
     }, bar)
-    corner(fill, 3)
+    corner(fill, 4)
     accent_gradient(fill, 0)
-
-    -- Highlight that sweeps across the fill as it grows.
-    local shimmer = create('Frame', {
-        Name = 'Shimmer',
-        Size = UDim2.fromScale(0.5, 1),
-        Position = UDim2.fromScale(-0.5, 0),
-        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-        BackgroundTransparency = 0.55,
-        BorderSizePixel = 0,
-        ZIndex = 5
-    }, fill)
-    gradient(shimmer, ColorSequence.new(Color3.fromRGB(255, 255, 255)), 0, NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 1),
-        NumberSequenceKeypoint.new(0.5, 0.25),
-        NumberSequenceKeypoint.new(1, 1)
-    }))
-
-    task.spawn(function()
-        while not closed and shimmer and shimmer.Parent do
-            shimmer.Position = UDim2.fromScale(-0.5, 0)
-            tween(shimmer, 1.2, { Position = UDim2.fromScale(1, 0) }, Enum.EasingStyle.Sine)
-            task.wait(1.5)
-        end
-    end)
-
-    local knob = create('Frame', {
-        Name = 'Knob',
-        Size = UDim2.fromOffset(9, 9),
-        Position = UDim2.new(0, 0, 0.5, 0),
-        AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-        BorderSizePixel = 0,
-        ZIndex = 6
-    }, bar)
-    corner(knob, 0, 1)
 
     -- Quote pinned to the bottom of the card, horizontally centred.
     local quote = create('TextLabel', {
@@ -1725,7 +1719,6 @@ function Library.create_loader(self, settings)
         else
             tween(fill, 0.25, { Size = UDim2.new(alpha, 0, 1, 0) }, Enum.EasingStyle.Quint)
         end
-        knob.Position = UDim2.new(alpha, 0, 0.5, 0)
         percent.Text = math.floor(alpha * 100 + 0.5) .. '%'
         eta.Text = format_time(duration * (1 - alpha))
 
@@ -2223,7 +2216,7 @@ function Library:create_ui()
     }, TopBar)
     -- Same animated wordmark as the loader, so the product name is consistent
     -- across the window chrome and the loading card.
-    Util:animate_wordmark(Product, { period = 3.6 })
+    Util:animate_wordmark(Product, { period = 2.8, pause = 1.1 })
 
     local Edition = create('Frame', {
         Name = 'Edition',
