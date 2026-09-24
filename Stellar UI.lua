@@ -905,23 +905,32 @@ function Notifications.push(settings)
 
     local kind = settings.type or 'info'
     local color_key = NOTIFY_COLORS[kind] or 'Accent'
+    local title_text = settings.title or tr('Success', 'Notification')
+    local body_text = tostring(settings.text or '')
 
-    local toast = create('Frame', {
+    -- Compute the toast height up front. Relying on AutomaticSize here made
+    -- the card jump around because its children are absolutely positioned.
+    local width = 306
+    local text_width = width - 72
+    local body_height = body_text ~= '' and math.max(14, measure_text(body_text, text_width, 10)) or 0
+    local height = math.max(62, 31 + body_height + (body_text ~= '' and 9 or 0) + 16)
+
+    local toast = create('CanvasGroup', {
         Name = 'Toast',
-        Size = UDim2.new(1, 0, 0, 62),
-        AutomaticSize = Enum.AutomaticSize.Y,
+        Size = UDim2.new(1, 0, 0, height),
         BackgroundColor3 = Theme.Panel_2,
-        BackgroundTransparency = 1,
+        BackgroundTransparency = 0,
         BorderSizePixel = 0,
+        GroupTransparency = 1,
         ClipsDescendants = false
     }, Notifications._container)
     corner(toast, 10)
-    local toast_stroke = stroke(toast, Theme.Border, 1, 1)
+    local toast_stroke = stroke(toast, Theme.Border, 1, 0.25)
     bind(toast, 'BackgroundColor3', 'Panel_2')
 
     local accent_bar = create('Frame', {
         Name = 'Accent',
-        Size = UDim2.new(0, 3, 1, -16),
+        Size = UDim2.new(0, 3, 0, math.max(16, height - 16)),
         Position = UDim2.new(0, 0, 0, 8),
         BackgroundColor3 = Theme[color_key],
         BorderSizePixel = 0
@@ -932,19 +941,25 @@ function Notifications.push(settings)
     local icon_holder = create('Frame', {
         Name = 'Icon',
         Size = UDim2.fromOffset(30, 30),
-        Position = UDim2.fromOffset(15, 13),
+        Position = UDim2.fromOffset(15, 14),
         BackgroundColor3 = Theme[color_key],
-        BackgroundTransparency = 0.85,
+        BackgroundTransparency = 0.82,
         BorderSizePixel = 0
     }, toast)
     corner(icon_holder, 1, 1)
     bind(icon_holder, 'BackgroundColor3', color_key)
 
+    -- The glyph label must fill its holder: without an explicit Size a
+    -- TextLabel defaults to 0x0 and the icon is invisible.
     local icon_label = create('TextLabel', {
+        Name = 'Glyph',
+        Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1,
         FontFace = font(Enum.FontWeight.Bold),
         TextColor3 = Theme[color_key],
-        TextSize = 14,
+        TextSize = 15,
+        TextXAlignment = Enum.TextXAlignment.Center,
+        TextYAlignment = Enum.TextYAlignment.Center,
         Text = NOTIFY_GLYPHS[kind] or 'i'
     }, icon_holder)
     bind(icon_label, 'TextColor3', color_key)
@@ -956,34 +971,37 @@ function Notifications.push(settings)
         TextColor3 = Theme.Text,
         TextSize = 12,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Text = settings.title or tr('Success', 'Notification'),
-        Size = UDim2.new(1, -100, 0, 16),
-        Position = UDim2.fromOffset(56, 13)
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Text = title_text,
+        Size = UDim2.new(1, -92, 0, 15),
+        Position = UDim2.fromOffset(56, 15)
     }, toast)
     bind(title, 'TextColor3', 'Text')
 
-    local body = create('TextLabel', {
-        Name = 'Body',
-        BackgroundTransparency = 1,
-        FontFace = body_font(Enum.FontWeight.Regular),
-        TextColor3 = Theme.Muted,
-        TextSize = 10,
-        TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Top,
-        Text = settings.text or '',
-        Size = UDim2.new(1, -72, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        Position = UDim2.fromOffset(56, 31)
-    }, toast)
-    bind(body, 'TextColor3', 'Muted')
+    local body
+    if body_text ~= '' then
+        body = create('TextLabel', {
+            Name = 'Body',
+            BackgroundTransparency = 1,
+            FontFace = body_font(Enum.FontWeight.Regular),
+            TextColor3 = Theme.Muted,
+            TextSize = 10,
+            TextWrapped = true,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Top,
+            Text = body_text,
+            Size = UDim2.new(1, -72, 0, body_height),
+            Position = UDim2.fromOffset(56, 33)
+        }, toast)
+        bind(body, 'TextColor3', 'Muted')
+    end
 
     local close = create('TextButton', {
         Name = 'Close',
         BackgroundTransparency = 1,
         FontFace = font(Enum.FontWeight.SemiBold),
         TextColor3 = Theme.Dim,
-        TextSize = 14,
+        TextSize = 15,
         Text = '×',
         Size = UDim2.fromOffset(22, 22),
         Position = UDim2.new(1, -30, 0, 9),
@@ -993,8 +1011,8 @@ function Notifications.push(settings)
 
     local progress_track = create('Frame', {
         Name = 'ProgressTrack',
-        Size = UDim2.new(1, -30, 0, 2),
-        Position = UDim2.new(0, 15, 1, -8),
+        Size = UDim2.new(1, -30, 0, 3),
+        Position = UDim2.new(0, 15, 1, -11),
         BackgroundColor3 = Theme.Panel_4,
         BorderSizePixel = 0
     }, toast)
@@ -1010,21 +1028,16 @@ function Notifications.push(settings)
     corner(progress_fill, 1, 1)
     bind(progress_fill, 'BackgroundColor3', color_key)
 
-    local duration = settings.duration or 5
+    local duration = tonumber(settings.duration) or 5
     local dismissed = false
 
     local function dismiss()
         if dismissed then return end
         dismissed = true
-        tween(toast, 0.28, { BackgroundTransparency = 1, Position = UDim2.new(0, 24, 0, 0) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-        tween(accent_bar, 0.2, { BackgroundTransparency = 1 })
-        tween(title, 0.2, { TextTransparency = 1 })
-        tween(body, 0.2, { TextTransparency = 1 })
-        tween(close, 0.2, { TextTransparency = 1 })
-        tween(icon_holder, 0.2, { BackgroundTransparency = 1 })
-        tween(icon_label, 0.2, { TextTransparency = 1 })
-        tween(progress_track, 0.2, { BackgroundTransparency = 1 })
-        tween(progress_fill, 0.2, { BackgroundTransparency = 1 })
+        -- Fade the whole group at once: a UIListLayout owns child Position,
+        -- so sliding is not possible, and per-child fades can leave text
+        -- floating over a transparent card.
+        tween(toast, 0.28, { GroupTransparency = 1 }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
         tween(toast_stroke, 0.2, { Transparency = 1 })
         task.delay(0.32, function()
             if toast then toast:Destroy() end
@@ -1033,12 +1046,14 @@ function Notifications.push(settings)
 
     close.MouseButton1Click:Connect(dismiss)
 
-    -- entrance: fade + rise
-    toast.Position = UDim2.new(0, 24, 0, 0)
-    tween(toast, 0.4, { BackgroundTransparency = 0, Position = UDim2.new(0, 0, 0, 0) })
-    tween(toast_stroke, 0.4, { Transparency = 0.25 })
-    tween(progress_fill, duration, { Size = UDim2.new(0, 0, 1, 0) }, Enum.EasingStyle.Linear)
-    task.delay(duration, dismiss)
+    -- entrance: fade the group in so the border, icon and text arrive together
+    tween(toast, 0.4, { GroupTransparency = 0 })
+    if duration > 0 then
+        tween(progress_fill, duration, { Size = UDim2.new(0, 0, 1, 0) }, Enum.EasingStyle.Linear)
+        task.delay(duration, dismiss)
+    else
+        progress_track.Visible = false
+    end
 end
 
 --=====================================================================
@@ -1191,6 +1206,42 @@ function Library.create_loader(self, settings)
     accent_gradient(logo_bg, 135)
     local logo_scale = create('UIScale', { Scale = 0.4 }, logo_bg)
 
+    -- Thin accent arc that orbits the mark. A transparent gradient on the
+    -- stroke makes it read as a spinner rather than a static ring.
+    local ring = create('Frame', {
+        Name = 'Ring',
+        Size = UDim2.fromOffset(72, 72),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        BackgroundTransparency = 1,
+        Rotation = 0,
+        ZIndex = 3
+    }, logo_holder)
+    corner(ring, 0, 1)
+    local ring_stroke = create('UIStroke', {
+        Color = accent,
+        Thickness = 2,
+        Transparency = 0.3,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    }, ring)
+    gradient(ring_stroke, ColorSequence.new({
+        ColorSequenceKeypoint.new(0, accent),
+        ColorSequenceKeypoint.new(1, accent)
+    }), 0, NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(0.5, 0.9),
+        NumberSequenceKeypoint.new(1, 0)
+    }))
+
+    local ring_angle = 0
+    task.spawn(function()
+        while not closed and ring and ring.Parent do
+            ring_angle = ring_angle + 360
+            tween(ring, 1.8, { Rotation = ring_angle }, Enum.EasingStyle.Linear)
+            task.wait(1.8)
+        end
+    end)
+
     local logo_image = create('ImageLabel', {
         Name = 'Logo',
         Size = UDim2.fromOffset(40, 40),
@@ -1254,6 +1305,30 @@ function Library.create_loader(self, settings)
     }, bar)
     corner(fill, 2)
     accent_gradient(fill, 0)
+
+    -- Highlight that sweeps across the fill as it grows.
+    local shimmer = create('Frame', {
+        Name = 'Shimmer',
+        Size = UDim2.fromScale(0.5, 1),
+        Position = UDim2.fromScale(-0.5, 0),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        BackgroundTransparency = 0.55,
+        BorderSizePixel = 0,
+        ZIndex = 4
+    }, fill)
+    gradient(shimmer, ColorSequence.new(Color3.fromRGB(255, 255, 255)), 0, NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1),
+        NumberSequenceKeypoint.new(0.5, 0.25),
+        NumberSequenceKeypoint.new(1, 1)
+    }))
+
+    task.spawn(function()
+        while not closed and shimmer and shimmer.Parent do
+            shimmer.Position = UDim2.fromScale(-0.5, 0)
+            tween(shimmer, 1.1, { Position = UDim2.fromScale(1, 0) }, Enum.EasingStyle.Sine)
+            task.wait(1.4)
+        end
+    end)
 
     local stage_label = create('TextLabel', {
         LayoutOrder = 4,
@@ -1331,10 +1406,17 @@ function Library.create_loader(self, settings)
         set_stage_text(text)
     end
 
-    function loader:set_progress(alpha)
+    function loader:set_progress(alpha, instant)
         if closed then return end
         alpha = math.clamp(alpha or 0, 0, 1)
-        tween(fill, 0.25, { Size = UDim2.new(alpha, 0, 1, 0) }, Enum.EasingStyle.Quint)
+        -- `instant` is used by the auto-progress driver: it updates the bar
+        -- every frame, so tweening each step would stack dozens of tweens
+        -- and make the bar stutter. Manual calls still animate smoothly.
+        if instant then
+            fill.Size = UDim2.new(alpha, 0, 1, 0)
+        else
+            tween(fill, 0.25, { Size = UDim2.new(alpha, 0, 1, 0) }, Enum.EasingStyle.Quint)
+        end
         local index = math.min(#stages, math.floor(alpha * #stages) + 1)
         if index ~= current_stage then
             current_stage = index
@@ -1387,12 +1469,12 @@ function Library.create_loader(self, settings)
             local start = os.clock()
             while auto_running and not closed do
                 local elapsed = os.clock() - start
-                loader:set_progress(math.min(elapsed / duration, 1))
+                loader:set_progress(math.min(elapsed / duration, 1), true)
                 if elapsed >= duration then break end
                 task.wait(0.03)
             end
             if not closed then
-                loader:set_progress(1)
+                loader:set_progress(1, true)
                 task.wait(0.45)
                 if not closed then loader:close() end
             end
@@ -1408,10 +1490,19 @@ end
 Library._config = Config:load(game.GameId)
 
 -- Look & feel knobs. Set these before calling `Library.new()`.
-Library.Shadow = true            -- draw a soft drop shadow behind the window
-Library.Shadow_Spread = 8        -- total extra pixels (4px each side)
-Library.Shadow_Drop = 2          -- downward offset of the shadow
-Library.Shadow_Transparency = 0.55
+--
+-- The drop shadow is OFF by default: the panel already has a crisp 1px
+-- hairline border, and a soft halo read as a distracting blur. Turn it on
+-- (with a hairline spread) only if you want a little lift.
+Library.Shadow = false            -- draw a subtle drop shadow behind the window
+Library.Shadow_Spread = 4         -- total extra pixels (2px each side)
+Library.Shadow_Drop = 1           -- downward offset of the shadow
+Library.Shadow_Transparency = 0.6
+
+-- Acrylic backdrop blur is opt-in. It renders a glass plane + depth of
+-- field behind the window, which some GPUs/executors draw as a large
+-- smear. Enable with `library.Acrylic = true` before `library:load()`.
+Library.Acrylic = false
 
 Library.Logo_Animation = 'Stellar' -- 'Stellar' | 'Ethereal' | sheet table | false
 Library.Logo = nil                 -- set to an asset id to use a static image
@@ -1440,9 +1531,24 @@ Library.Theme_Presets = Theme_Presets
 Library.__index = Library
 
 function Library.new()
+    -- Every mutable field lives on the instance so multiple windows can
+    -- coexist without sharing tabs, search results or visibility state.
     local self = setmetatable({
         _loaded = false,
-        _tab = 0
+        _tab = 0,
+        _ui = nil,
+        _ui_open = true,
+        _ui_loaded = false,
+        _ui_scale = 1,
+        _refs = {},
+        _tabs = {},
+        _search_items = {},
+        _active_tab = nil,
+        _search_text = '',
+        _dragging = false,
+        _drag_start = nil,
+        _container_position = nil,
+        _choosing_keybind = false
     }, Library)
 
     self:create_ui()
@@ -1484,10 +1590,17 @@ function Library:removed(action)
     end
 end
 
--- Public notification entry point. Supports both
--- `Library.SendNotification{...}` and `library:SendNotification{...}`.
-function Library.SendNotification(settings)
-    if settings == Library then settings = nil end
+-- Public notification entry point. Supports both the dot form
+-- (`Library.SendNotification{...}`) and the colon form used by most
+-- scripts (`library:SendNotification{...}`). When called with a colon the
+-- library instance arrives as the first argument, so unwrap it here.
+function Library.SendNotification(first, second)
+    local settings = second
+    if settings == nil then
+        local is_instance = type(first) == 'table'
+            and (first == Library or getmetatable(first) == Library)
+        settings = is_instance and nil or first
+    end
     Notifications.push(settings)
 end
 Library.notify = Library.SendNotification
@@ -1559,20 +1672,19 @@ function Library:create_ui()
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     }, CoreGui)
 
-    -- Tight drop shadow. Just a few pixels of depth so the panel reads as
-    -- floating — no big blurred halo. Set `Library.Shadow = false` to drop
-    -- it entirely, or tune the spread/transparency before `Library.new()`.
+    -- Optional hairline drop shadow (off by default). When enabled it adds
+    -- only a couple of pixels of depth — never a big blurred halo.
     local shadow
-    local shadow_spread = tonumber(Library.Shadow_Spread) or 8
-    local shadow_drop = tonumber(Library.Shadow_Drop) or 2
-    if Library.Shadow ~= false then
+    local shadow_spread = tonumber(Library.Shadow_Spread) or 4
+    local shadow_drop = tonumber(Library.Shadow_Drop) or 1
+    if Library.Shadow == true then
         shadow = create('Frame', {
             Name = 'Shadow',
             AnchorPoint = Vector2.new(0.5, 0.5),
             Position = UDim2.fromScale(0.5, 0.5),
             Size = UDim2.fromOffset(0, 0),
             BackgroundColor3 = Color3.new(0, 0, 0),
-            BackgroundTransparency = tonumber(Library.Shadow_Transparency) or 0.55,
+            BackgroundTransparency = tonumber(Library.Shadow_Transparency) or 0.6,
             BorderSizePixel = 0,
             ZIndex = 1
         }, Stellar)
@@ -1772,7 +1884,7 @@ function Library:create_ui()
     end
 
     local Close = make_control('×', 0)
-    Tooltip.attach(Close, 'Close')
+    Tooltip.attach(Close, 'Close interface')
     Tooltip.attach(LogoMark, 'Minimize / open')
 
     -- search
@@ -2144,7 +2256,7 @@ function Library:create_ui()
     --  Search behaviour
     --=================================================================
     SearchInput:GetPropertyChangedSignal('Text'):Connect(function()
-        Library:set_search(SearchInput.Text)
+        self:set_search(SearchInput.Text)
     end)
 
     --=================================================================
@@ -2191,8 +2303,9 @@ function Library:create_ui()
     end)
 
     Close.MouseButton1Click:Connect(function()
-        self._ui_open = false
-        self:change_visiblity(false)
+        -- The × fully tears the interface down. Use the top-left logo (or
+        -- Left CTRL) when you only want to minimize.
+        self:destroy()
     end)
 
     Connections['library_visibility'] = UserInputService.InputBegan:Connect(function(input, processed)
@@ -2265,7 +2378,7 @@ function Library:create_ui()
         end
 
         tween(Container, 0.5, { Size = UDim2.fromOffset(WIN_W, WIN_H), GroupTransparency = 0 })
-        if self.Acrylic ~= false then
+        if self.Acrylic == true then
             pcall(function() AcrylicBlur.new(Container) end)
         end
         self._ui_loaded = true
@@ -2631,6 +2744,26 @@ local function build_module(parent, settings, library, tab, opts)
         end
     end)
 
+    -- The whole header is the hit target: clicking anywhere on the card's
+    -- top row (including the switch) flips the module on or off. The keybind
+    -- chip is a child button, so its clicks never reach the header.
+    if has_toggle then
+        Header.MouseButton1Click:Connect(function()
+            instance:change_state(not instance._state)
+        end)
+
+        Header.MouseEnter:Connect(function()
+            if not instance._state then
+                tween(Module, 0.2, { BackgroundColor3 = Theme.Panel_3 })
+            end
+        end)
+        Header.MouseLeave:Connect(function()
+            if not instance._state then
+                tween(Module, 0.2, { BackgroundColor3 = Theme.Panel_2 })
+            end
+        end)
+    end
+
     return instance
 end
 
@@ -2966,14 +3099,16 @@ function TabManager:create_module(settings)
         tab = self
     })
 
-    if settings.flag then
-        if self._library:flag_type(settings.flag, 'boolean') then
+    if settings.flag or settings.default ~= nil then
+        if settings.flag and self._library:flag_type(settings.flag, 'boolean') then
             module:change_state(self._library._config._flags[settings.flag], true, true)
         elseif settings.default ~= nil then
             module:change_state(settings.default, true, true)
         else
             module:change_state(false, true, true)
         end
+    end
+    if settings.flag then
         module:connect_keybind()
     end
 
@@ -2998,9 +3133,11 @@ end
 function TabManager:create_image(settings)
     settings = settings or {}
     local parent = settings.section == 'right' and self._right or self._left
+    local height = tonumber(settings.height) or 150
+
     local card = create('Frame', {
         Name = 'ImageModule',
-        Size = UDim2.new(0, CARD_W, 0, 140),
+        Size = UDim2.new(0, CARD_W, 0, height),
         BackgroundColor3 = Theme.Panel_2,
         BorderSizePixel = 0,
         ClipsDescendants = true,
@@ -3011,18 +3148,87 @@ function TabManager:create_image(settings)
     bind(card, 'BackgroundColor3', 'Panel_2')
     bind(card_stroke, 'Color', 'Border')
 
+    local image_id = Util:resolve_asset_id(settings.image)
     local image = create('ImageLabel', {
         Name = 'Image',
         Size = UDim2.new(1, -16, 1, -16),
         Position = UDim2.fromOffset(8, 8),
         BackgroundTransparency = 1,
-        Image = Util:resolve_asset_id(settings.image) or '',
+        Image = image_id or '',
+        ImageTransparency = image_id and (settings.transparency or 0) or 1,
         ScaleType = settings.scale_type or Enum.ScaleType.Crop,
         ZIndex = 5
     }, card)
     corner(image, 8)
 
-    table.insert(self._library._search_items, { frame = card, title = settings.title or 'Image', tab = self })
+    -- Graceful placeholder while there is no image (or if the asset fails).
+    local placeholder = create('Frame', {
+        Name = 'Placeholder',
+        Size = image.Size,
+        Position = image.Position,
+        BackgroundColor3 = Theme.Panel_3,
+        BorderSizePixel = 0,
+        Visible = image_id == nil,
+        ZIndex = 5
+    }, card)
+    corner(placeholder, 8)
+    bind(placeholder, 'BackgroundColor3', 'Panel_3')
+
+    local placeholder_label = create('TextLabel', {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        FontFace = body_font(Enum.FontWeight.Regular),
+        TextColor3 = Theme.Dim,
+        TextSize = 10,
+        Text = settings.placeholder or 'No image',
+        ZIndex = 6
+    }, placeholder)
+    bind(placeholder_label, 'TextColor3', 'Dim')
+
+    if image_id then
+        pcall(function()
+            ContentProvider:PreloadAsync({ image }, function(_, status)
+                if status ~= Enum.AssetFetchStatus.Success then
+                    placeholder.Visible = true
+                end
+            end)
+        end)
+    end
+
+    if settings.title then
+        local caption = create('Frame', {
+            Name = 'Caption',
+            Size = UDim2.new(1, -16, 0, 26),
+            Position = UDim2.new(0, 8, 1, -34),
+            BackgroundColor3 = Theme.Panel,
+            BackgroundTransparency = 0.12,
+            BorderSizePixel = 0,
+            ZIndex = 6
+        }, card)
+        corner(caption, 7)
+        bind(caption, 'BackgroundColor3', 'Panel')
+
+        local caption_label = create('TextLabel', {
+            Size = UDim2.new(1, -16, 1, 0),
+            Position = UDim2.fromOffset(8, 0),
+            BackgroundTransparency = 1,
+            FontFace = font(Enum.FontWeight.SemiBold),
+            TextColor3 = Theme.Text,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Text = settings.title,
+            ZIndex = 7
+        }, caption)
+        bind(caption_label, 'TextColor3', 'Text')
+    end
+
+    table.insert(self._library._search_items, {
+        frame = card,
+        title = settings.title or 'Image',
+        description = settings.description,
+        tab = self
+    })
     return card
 end
 
@@ -4555,15 +4761,27 @@ end
 --=====================================================================
 function Library:destroy()
     Connections:disconnect_all()
-    local Stellar = CoreGui:FindFirstChild('Stellar')
-    if Stellar then Stellar:Destroy() end
+
+    -- Tear down this instance's own window (not whichever ScreenGui happens
+    -- to share the name, so multiple windows can coexist).
+    if self._ui then
+        pcall(function() self._ui:Destroy() end)
+    end
+
     local loader = CoreGui:FindFirstChild('StellarLoader')
     if loader then loader:Destroy() end
     local notifications = CoreGui:FindFirstChild('StellarNotifications')
     if notifications then notifications:Destroy() end
     local tooltip = CoreGui:FindFirstChild('StellarTooltip')
     if tooltip then tooltip:Destroy() end
+
     self._ui = nil
+    self._refs = {}
+    self._tabs = {}
+    self._search_items = {}
+    self._active_tab = nil
+    self._search_text = ''
+    self._ui_open = false
 end
 
 return Library
