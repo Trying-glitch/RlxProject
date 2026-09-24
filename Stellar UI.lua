@@ -1342,6 +1342,57 @@ function Library.create_loader(self, settings)
     }, container)
     bind(stage_label, 'TextColor3', 'Muted')
 
+    -- Live activity log: every stage prints a line that turns into a tick
+    -- when it finishes, so the loader reads like a real startup sequence
+    -- ("› loading assets ✓", "› building files …").
+    local log_frame = create('Frame', {
+        LayoutOrder = 5,
+        Size = UDim2.fromOffset(300, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        ZIndex = 2
+    }, container)
+    list_layout(log_frame, {
+        FillDirection = Enum.FillDirection.Vertical,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 4)
+    })
+
+    local log_lines = {}
+    local max_log_lines = tonumber(settings.max_log_lines) or 5
+
+    local function add_log(text, state)
+        if closed then return nil end
+        local line = create('TextLabel', {
+            LayoutOrder = #log_lines + 1,
+            Size = UDim2.fromOffset(300, 14),
+            BackgroundTransparency = 1,
+            FontFace = body_font(Enum.FontWeight.Regular),
+            TextColor3 = Theme.Muted,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = '> ' .. tostring(text) .. (state == 'active' and ' ...' or ''),
+            TextTransparency = 1,
+            ZIndex = 2
+        }, log_frame)
+        bind(line, 'TextColor3', state == 'done' and 'Dim' or 'Muted')
+        tween(line, 0.25, { TextTransparency = 0 })
+        table.insert(log_lines, line)
+        if #log_lines > max_log_lines then
+            local oldest = table.remove(log_lines, 1)
+            if oldest then oldest:Destroy() end
+        end
+        return line
+    end
+
+    local function complete_log()
+        local line = log_lines[#log_lines]
+        if not line or not line.Parent then return end
+        line.Text = line.Text:gsub('%s*%.%.%.%s*$', '') .. '  ✓'
+        line.TextColor3 = Theme.Dim
+    end
+
     -- Stage text crossfade. The token guards against stacked delays when
     -- progress updates arrive faster than the fade completes.
     local current_stage = 1
@@ -1403,7 +1454,9 @@ function Library.create_loader(self, settings)
 
     function loader:set_stage(text)
         if closed then return end
+        complete_log()
         set_stage_text(text)
+        add_log(text, 'active')
     end
 
     function loader:set_progress(alpha, instant)
@@ -1419,11 +1472,24 @@ function Library.create_loader(self, settings)
         end
         local index = math.min(#stages, math.floor(alpha * #stages) + 1)
         if index ~= current_stage then
+            complete_log()
             current_stage = index
             set_stage_text(stages[index])
             bloom_to_stage(index)
+            add_log(stages[index], 'active')
         end
-        if alpha >= 1 then burst() end
+        if alpha >= 1 then
+            complete_log()
+            burst()
+        end
+    end
+
+    -- Append a custom line to the live log (useful for real work, e.g.
+    -- "› downloading config.json …").
+    function loader:log(text)
+        if closed then return end
+        complete_log()
+        add_log(text, 'active')
     end
 
     -- Idempotent close: teardown happens once, and an explicit override
@@ -1439,21 +1505,29 @@ function Library.create_loader(self, settings)
         if scale_connection then scale_connection:Disconnect() end
         if stop_logo then stop_logo() end
 
+        -- The glow and the orbiting ring are circles; a UIStroke is not a
+        -- GuiObject so the fade loop below never touches it. Hide both
+        -- immediately, otherwise a lone blue circle lingers for the whole
+        -- close animation.
+        if glow then glow.Visible = false end
+        if ring then ring.Visible = false end
+        if ring_stroke then ring_stroke.Transparency = 1 end
+
         tween(backdrop, 0.4, { BackgroundTransparency = 1 })
-        tween(container, 0.35, { Position = UDim2.fromScale(0.5, 0.54) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+        tween(container, 0.3, { Position = UDim2.fromScale(0.5, 0.54) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
         for _, descendant in ipairs(container:GetDescendants()) do
             if descendant:IsA('GuiObject') then
-                tween(descendant, 0.3, { BackgroundTransparency = 1 })
+                tween(descendant, 0.26, { BackgroundTransparency = 1 })
             end
             if descendant:IsA('TextLabel') then
-                tween(descendant, 0.3, { TextTransparency = 1 })
+                tween(descendant, 0.26, { TextTransparency = 1 })
             end
             if descendant:IsA('ImageLabel') then
-                tween(descendant, 0.3, { ImageTransparency = 1 })
+                tween(descendant, 0.26, { ImageTransparency = 1 })
             end
         end
 
-        task.wait(0.4)
+        task.wait(0.32)
         gui:Destroy()
 
         local callback = override_callback or settings.callback
@@ -1461,17 +1535,22 @@ function Library.create_loader(self, settings)
     end
 
     set_stage_text(stages[1])
+    add_log(stages[1], 'active')
 
-    if settings.auto_progress then
+    if settings.auto_progress ~= false then
         auto_running = true
         task.spawn(function()
             local duration = math.max(0.1, tonumber(settings.duration) or 2.6)
-            local start = os.clock()
+            -- Accumulate the real delta from task.wait instead of reading
+            -- os.clock(): on some executors os.clock() is CPU time, which
+            -- barely advances while the thread yields and made the bar jump
+            -- or stall unpredictably.
+            local elapsed = 0
             while auto_running and not closed do
-                local elapsed = os.clock() - start
+                local delta = task.wait(0.03) or 0.03
+                elapsed = elapsed + delta
                 loader:set_progress(math.min(elapsed / duration, 1), true)
                 if elapsed >= duration then break end
-                task.wait(0.03)
             end
             if not closed then
                 loader:set_progress(1, true)
@@ -1524,6 +1603,8 @@ Library._tabs = {}
 Library._search_items = {}
 Library._active_tab = nil
 Library._search_text = ''
+Library._open_dropdown = nil
+Library._status_token = 0
 
 Library.Theme = Theme
 Library.Theme_Presets = Theme_Presets
@@ -1545,6 +1626,8 @@ function Library.new()
         _search_items = {},
         _active_tab = nil,
         _search_text = '',
+        _open_dropdown = nil,
+        _status_token = 0,
         _dragging = false,
         _drag_start = nil,
         _container_position = nil,
@@ -1641,6 +1724,7 @@ function Library:set_theme(name_or_table)
         Theme[key] = value
     end
     apply_theme()
+    self:status('Theme: ' .. tostring(Theme_Name), 'action')
     return true
 end
 
@@ -1656,6 +1740,49 @@ function Library:set_accent(color)
     Theme_Name = 'Custom'
     apply_theme()
     return true
+end
+
+--=====================================================================
+--  Live status (sidebar footer)
+--  Every interaction can call this. The footer shows the action for a
+--  couple of seconds, then settles back to "System ready".
+--=====================================================================
+local STATUS_DEFAULT = 'System ready'
+
+function Library:status(text, kind, duration)
+    local refs = self._refs
+    local dot = refs and refs.FooterDot
+    local label = refs and refs.FooterText
+    if not (dot and label) then return end
+
+    self._status_token = (self._status_token or 0) + 1
+    local token = self._status_token
+
+    local colors = {
+        info = Theme.Accent,
+        action = Theme.Accent,
+        success = Theme.Success,
+        warning = Theme.Warning,
+        error = Theme.Danger
+    }
+    local color = colors[kind or 'info'] or Theme.Accent
+
+    label.Text = tostring(text or STATUS_DEFAULT)
+    label.TextColor3 = color
+    label.Position = UDim2.fromOffset(22, 4)
+    tween(label, 0.22, { TextTransparency = 0, Position = UDim2.fromOffset(22, 0) }, Enum.EasingStyle.Back)
+    dot.BackgroundColor3 = color
+    dot.Size = UDim2.fromOffset(9, 9)
+    tween(dot, 0.25, { Size = UDim2.fromOffset(6, 6) }, Enum.EasingStyle.Back)
+
+    task.delay(duration or 2.4, function()
+        if token ~= self._status_token then return end
+        if not (dot and dot.Parent and label and label.Parent) then return end
+        label.Text = STATUS_DEFAULT
+        label.TextColor3 = Theme.Muted
+        dot.BackgroundColor3 = Theme.Success
+        dot.Size = UDim2.fromOffset(6, 6)
+    end)
 end
 
 --=====================================================================
@@ -2117,12 +2244,14 @@ function Library:create_ui()
         TextColor3 = Theme.Muted,
         TextSize = 9,
         TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
         Text = 'System ready',
         Size = UDim2.new(1, -60, 1, 0),
         Position = UDim2.fromOffset(22, 0),
         ZIndex = 4
     }, SidebarFooter)
-    bind(SidebarFooter:FindFirstChildWhichIsA('TextLabel'), 'TextColor3', 'Muted')
+    local FooterText = SidebarFooter:FindFirstChildWhichIsA('TextLabel')
+    bind(FooterText, 'TextColor3', 'Muted')
 
     local HintKey = create('TextLabel', {
         Name = 'Hint',
@@ -2245,6 +2374,8 @@ function Library:create_ui()
         Columns = Columns,
         EmptyState = EmptyState,
         EmptyLabel = empty_label,
+        FooterDot = FooterDot,
+        FooterText = FooterText,
         LogoMark = LogoMark,
         LogoImage = LogoImage,
         Close = Close,
@@ -2338,6 +2469,11 @@ function Library:create_ui()
     end
 
     function self:change_visiblity(state)
+        -- A floating dropdown menu must never outlive the window it belongs
+        -- to; close it whenever the interface is minimized or reopened.
+        if self._open_dropdown then
+            self._open_dropdown:unfold_settings()
+        end
         if state then
             Body.Visible = true
             TopBar.Search.Visible = true
@@ -2486,6 +2622,11 @@ local function make_keybind_chip(parent, flag, library, on_change, tooltip_text)
         Config:save(game.GameId, library._config)
         set_text(key)
         if on_change then on_change(key) end
+        if key == nil then
+            library:status('Cleared keybind', 'warning')
+        else
+            library:status('Bound ' .. tostring(key):gsub('Enum.KeyCode.', ''), 'action')
+        end
     end
 
     chip.MouseButton1Click:Connect(function()
@@ -2839,6 +2980,13 @@ function ModuleManager:change_state(state, initial, silent)
     if self._settings.callback and not silent then
         self._settings.callback(state)
     end
+
+    if not silent then
+        self._library:status(
+            (state and 'Enabled ' or 'Disabled ') .. tostring(self._settings.title or 'module'),
+            state and 'success' or 'warning'
+        )
+    end
 end
 
 function ModuleManager:get_state()
@@ -3002,7 +3150,7 @@ function Library:create_tab(title, icon)
 
     table.insert(self._tabs, tab)
 
-    local function activate()
+    local function activate(silent)
         for _, other in ipairs(self._tabs) do
             local is_active = other == tab
             other._sections.Visible = is_active
@@ -3031,6 +3179,9 @@ function Library:create_tab(title, icon)
         refs.TabTitle.Text = title or 'Tab'
         refs.TabSubtitle.Text = tostring(#tab._modules) .. ' feature' .. (#tab._modules == 1 and '' or 's') .. ' available'
         refs.EmptyState.Visible = false
+        if not silent then
+            self:status('Opened ' .. tostring(title or 'tab'), 'action')
+        end
     end
 
     tab._activate = activate
@@ -3050,7 +3201,7 @@ function Library:create_tab(title, icon)
     end)
 
     if self._active_tab == nil then
-        activate()
+        activate(true)
     end
 
     -- keep tab tinting correct through palette swaps
@@ -3434,6 +3585,10 @@ function ModuleManager:create_textbox(settings)
             Config:save(game.GameId, self._library._config)
         end
         if settings.callback then settings.callback(text) end
+        self._library:status(
+            (settings.title or 'Input') .. ': ' .. (text ~= '' and tostring(text) or 'empty'),
+            'info'
+        )
     end
 
     function manager:get_text()
@@ -3531,6 +3686,12 @@ function ModuleManager:create_checkbox(settings)
         end
         if not silent and settings.callback then
             settings.callback(state)
+        end
+        if not silent then
+            self._library:status(
+                (state and 'Enabled ' or 'Disabled ') .. tostring(settings.title or 'toggle'),
+                state and 'success' or 'warning'
+            )
         end
     end
 
@@ -3633,6 +3794,7 @@ function ModuleManager:create_button(settings)
 
     button.MouseButton1Click:Connect(function()
         if settings.callback then settings.callback() end
+        self._library:status(settings.title or 'Action', variant == 'danger' and 'error' or 'action')
     end)
 
     self:refresh()
@@ -3792,6 +3954,20 @@ function ModuleManager:create_slider(settings)
     local knob_stroke = stroke(knob, Theme.Accent, 2, 0)
     bind(knob_stroke, 'Color', 'Accent')
 
+    -- A plain Frame does not receive InputBegan in Roblox unless Active is
+    -- true. Use an invisible TextButton as the hit target instead: buttons
+    -- always sink input, and a taller strip makes the thin track easy to
+    -- grab on touch devices.
+    local hit = create('TextButton', {
+        Name = 'Hit',
+        Size = UDim2.new(1, 0, 0, 18),
+        Position = UDim2.fromOffset(0, 23),
+        BackgroundTransparency = 1,
+        Text = '',
+        AutoButtonColor = false,
+        ZIndex = 8
+    }, frame)
+
     local dragging = false
 
     local function format(value)
@@ -3841,7 +4017,7 @@ function ModuleManager:create_slider(settings)
         Connections:disconnect(slider_id .. '_end')
     end
 
-    track.InputBegan:Connect(function(input)
+    hit.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
             return
         end
@@ -3866,13 +4042,17 @@ function ModuleManager:create_slider(settings)
             if not settings.ignoresaved and settings.flag then
                 Config:save(game.GameId, self._library._config)
             end
+            self._library:status(
+                (settings.title or 'Slider') .. ' set to ' .. format(manager._value or minimum) .. (settings.suffix or ''),
+                'info'
+            )
         end)
     end)
 
-    track.MouseEnter:Connect(function()
+    hit.MouseEnter:Connect(function()
         if not dragging then tween(knob, 0.15, { Size = UDim2.fromOffset(14, 14) }) end
     end)
-    track.MouseLeave:Connect(function()
+    hit.MouseLeave:Connect(function()
         if not dragging then tween(knob, 0.15, { Size = UDim2.fromOffset(12, 12) }) end
     end)
 
@@ -3881,6 +4061,10 @@ function ModuleManager:create_slider(settings)
         initial = self._library._config._flags[settings.flag]
     end
     apply(initial, false, false)
+
+    manager._frame = frame
+    manager._hit = hit
+    manager._track = track
 
     self:refresh()
     return manager
@@ -3891,22 +4075,28 @@ end
 --=====================================================================
 function ModuleManager:create_dropdown(settings)
     settings = settings or {}
-    local manager = { _state = false, _module = self }
+    local library = self._library
+    local manager = { _state = false, _module = self, _value = nil }
     local options = {}
     for _, option in ipairs(settings.options or {}) do
         table.insert(options, option)
     end
 
-    local height_closed = 44
-    local option_height = 24
+    local option_height = 26
+    local option_gap = 2
     local max_visible = settings.maximum_options or 7
-    local options_height = math.min(#options, max_visible) * option_height + 8
+    local row_height = 48
+
+    local function list_height_for(count)
+        count = math.min(count, max_visible)
+        if count <= 0 then return 8 end
+        return count * option_height + (count - 1) * option_gap + 8
+    end
 
     local frame = create('Frame', {
         Name = 'Dropdown',
-        Size = UDim2.new(0, BODY_W, 0, height_closed),
+        Size = UDim2.new(0, BODY_W, 0, row_height),
         BackgroundTransparency = 1,
-        ClipsDescendants = true,
         ZIndex = 5
     }, self._body)
 
@@ -3951,38 +4141,72 @@ function ModuleManager:create_dropdown(settings)
     }, box)
     local chevron = draw_chevron(chevron_holder, 10, Theme.Dim, 1.6)
     bind_fn(function()
+        if not chevron.Parent then return end
         for _, child in ipairs(chevron:GetDescendants()) do
             if child:IsA('Frame') then child.BackgroundColor3 = Theme.Dim end
         end
     end)
 
-    local options_frame = create('ScrollingFrame', {
-        Name = 'Options',
-        Size = UDim2.new(1, 0, 0, options_height),
-        Position = UDim2.fromOffset(0, height_closed),
+    -- The menu floats in the ScreenGui rather than living inside the card.
+    -- A module card clips its descendants, and an option list buried in that
+    -- hierarchy can be clipped away or covered by a sibling card. Parenting
+    -- the menu to the ScreenGui keeps every option on top and clickable no
+    -- matter how the card is laid out or scrolled.
+    local overlay = create('Frame', {
+        Name = 'DropdownOverlay',
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Visible = false,
+        ZIndex = 400
+    }, library._refs.Stellar)
+
+    -- Full-screen catcher so a click anywhere outside the menu dismisses it.
+    local catcher = create('TextButton', {
+        Name = 'Catcher',
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = '',
+        AutoButtonColor = false,
+        ZIndex = 400
+    }, overlay)
+
+    local list = create('ScrollingFrame', {
+        Name = 'List',
+        Size = UDim2.fromOffset(BODY_W, 0),
         BackgroundColor3 = Theme.Panel_3,
-        BackgroundTransparency = 0.35,
+        BackgroundTransparency = 0.02,
         BorderSizePixel = 0,
+        ClipsDescendants = true,
         ScrollBarThickness = 3,
         ScrollBarImageColor3 = Theme.Accent,
         ScrollBarImageTransparency = 0.4,
         CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
-        ZIndex = 6
-    }, frame)
-    corner(options_frame, 8)
-    list_layout(options_frame, { Padding = UDim.new(0, 2) })
-    padding(options_frame, 4, 4, 4, 4)
+        Active = true,
+        ZIndex = 401
+    }, overlay)
+    corner(list, 8)
+    local list_stroke = stroke(list, Theme.Border, 1, 0.35)
+    list_layout(list, { Padding = UDim.new(0, option_gap) })
+    padding(list, 4, 4, 4, 4)
+    bind(list, 'BackgroundColor3', 'Panel_3')
+    bind(list_stroke, 'Color', 'Border')
+
+    -- Exposed for introspection / tests.
+    manager._overlay = overlay
+    manager._list = list
+    manager._box = box
+    manager._frame = frame
 
     local option_buttons = {}
 
     local function display(value)
         if settings.multi_dropdown then
-            local list = value or {}
-            if type(list) ~= 'table' then list = { list } end
-            if #list == 0 then return tr('DropdownNone', 'None') end
+            local values = value or {}
+            if type(values) ~= 'table' then values = { values } end
+            if #values == 0 then return tr('DropdownNone', 'None') end
             local names = {}
-            for _, item in ipairs(list) do
+            for _, item in ipairs(values) do
                 table.insert(names, typeof(item) == 'string' and item or item.Name)
             end
             return table.concat(names, ', ')
@@ -3992,59 +4216,82 @@ function ModuleManager:create_dropdown(settings)
     end
 
     local function refresh_selection(value)
+        local lookup = {}
         if settings.multi_dropdown then
-            local list = value or {}
-            if type(list) ~= 'table' then list = { list } end
-            for option_value, entry in pairs(option_buttons) do
-                local selected = false
-                for _, item in ipairs(list) do
-                    if item == option_value then selected = true break end
-                end
-                entry.mark.Visible = selected
-                entry.label.TextColor3 = selected and Theme.Accent or Theme.Muted
+            local values = value or {}
+            if type(values) ~= 'table' then values = { values } end
+            for _, item in ipairs(values) do lookup[item] = true end
+        end
+        for option_value, entry in pairs(option_buttons) do
+            local selected
+            if settings.multi_dropdown then
+                selected = lookup[option_value] == true
+            else
+                selected = option_value == value
             end
-        else
-            for option_value, entry in pairs(option_buttons) do
-                local selected = option_value == value
-                entry.mark.Visible = selected
-                entry.label.TextColor3 = selected and Theme.Accent or Theme.Muted
-            end
+            entry.mark.Visible = selected
+            entry.button.TextColor3 = selected and Theme.Accent or Theme.Muted
         end
     end
 
     function manager:update(value)
+        manager._value = value
         current_label.Text = display(value)
         refresh_selection(value)
-
         if settings.flag then
-            self._module._library._config._flags[settings.flag] = value
-            Config:save(game.GameId, self._module._library._config)
+            library._config._flags[settings.flag] = value
+            Config:save(game.GameId, library._config)
         end
         if settings.callback then settings.callback(value) end
+        library:status((settings.title or 'Dropdown') .. ': ' .. display(value), 'info')
+    end
+
+    local function close_list()
+        if not manager._state then return end
+        manager._state = false
+        if library._open_dropdown == manager then library._open_dropdown = nil end
+        overlay.Visible = false
+        tween(chevron_holder, 0.25, { Rotation = 0 })
+        tween(box_stroke, 0.2, { Color = Theme.Border, Transparency = 0.4 })
+    end
+
+    local function place_list()
+        local box_position = box.AbsolutePosition
+        local box_size = box.AbsoluteSize
+        local height = list_height_for(#options)
+        local x = box_position.X
+        local y = box_position.Y + box_size.Y + 4
+        local container = library._refs.Container
+        if container then
+            local cpos = container.AbsolutePosition
+            local csize = container.AbsoluteSize
+            if y + height > cpos.Y + csize.Y - 8 then
+                y = math.max(cpos.Y + 8, box_position.Y - height - 4)
+            end
+        end
+        list.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
+        list.Size = UDim2.fromOffset(math.floor(box_size.X), height)
     end
 
     function manager:unfold_settings()
-        self._state = not self._state
-        if self._state then
-            frame.Size = UDim2.new(0, BODY_W, 0, height_closed + options_height)
-            options_frame.BackgroundTransparency = 0.35
-            tween(chevron_holder, 0.3, { Rotation = 180 })
-            tween(box_stroke, 0.25, { Color = Theme.Accent, Transparency = 0.2 })
-        else
-            frame.Size = UDim2.new(0, BODY_W, 0, height_closed)
-            tween(chevron_holder, 0.3, { Rotation = 0 })
-            tween(box_stroke, 0.25, { Color = Theme.Border, Transparency = 0.4 })
+        if manager._state then
+            close_list()
+            return
         end
-        self._module:refresh()
+        if library._open_dropdown and library._open_dropdown ~= manager then
+            library._open_dropdown:unfold_settings()
+        end
+        manager._state = true
+        library._open_dropdown = manager
+        place_list()
+        overlay.Visible = true
+        tween(chevron_holder, 0.25, { Rotation = 180 })
+        tween(box_stroke, 0.2, { Color = Theme.Accent, Transparency = 0.2 })
     end
 
     local function rebuild(new_options)
         options = new_options or {}
-        options_height = math.min(#options, max_visible) * option_height + 8
-        options_frame.Size = UDim2.new(1, 0, 0, options_height)
-        options_frame.CanvasSize = UDim2.new(0, 0, 0, 0)
-
-        for _, child in ipairs(options_frame:GetChildren()) do
+        for _, child in ipairs(list:GetChildren()) do
             if child:IsA('TextButton') then child:Destroy() end
         end
         option_buttons = {}
@@ -4063,10 +4310,11 @@ function ModuleManager:create_dropdown(settings)
                 TextXAlignment = Enum.TextXAlignment.Left,
                 Text = text,
                 AutoButtonColor = false,
-                ZIndex = 7
-            }, options_frame)
+                ZIndex = 402
+            }, list)
             corner(option, 6)
             padding(option, 0, 8, 0, 8)
+            bind(option, 'BackgroundColor3', 'Panel_4')
 
             local mark = create('Frame', {
                 Name = 'Mark',
@@ -4075,56 +4323,50 @@ function ModuleManager:create_dropdown(settings)
                 AnchorPoint = Vector2.new(1, 0.5),
                 BackgroundTransparency = 1,
                 Visible = false,
-                ZIndex = 8
+                ZIndex = 403
             }, option)
             draw_check(mark, Theme.Accent, 1.6)
-
-            local label = create('TextLabel', {
-                BackgroundTransparency = 1,
-                FontFace = body_font(Enum.FontWeight.Regular),
-                TextColor3 = Theme.Muted,
-                TextSize = 10,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Text = text,
-                Size = UDim2.new(1, -16, 1, 0),
-                ZIndex = 8
-            }, option)
-            bind(label, 'TextColor3', 'Muted')
-            option.Text = ''
+            bind_fn(function()
+                if not mark.Parent then return end
+                for _, child in ipairs(mark:GetDescendants()) do
+                    if child:IsA('Frame') then child.BackgroundColor3 = Theme.Accent end
+                end
+            end)
 
             option.MouseEnter:Connect(function()
-                tween(option, 0.15, { BackgroundTransparency = 0.5 })
+                tween(option, 0.15, { BackgroundTransparency = 0.6 })
             end)
             option.MouseLeave:Connect(function()
                 tween(option, 0.15, { BackgroundTransparency = 1 })
             end)
             option.MouseButton1Click:Connect(function()
                 if settings.multi_dropdown then
-                    local list = self._module._library._config._flags[settings.flag]
-                    if type(list) ~= 'table' then list = {} end
+                    local current = settings.flag and library._config._flags[settings.flag] or manager._value
+                    if type(current) ~= 'table' then current = {} end
+                    local next_list = {}
                     local found = false
-                    for index, item in ipairs(list) do
+                    for _, item in ipairs(current) do
                         if item == option_value then
-                            table.remove(list, index)
                             found = true
-                            break
+                        else
+                            table.insert(next_list, item)
                         end
                     end
-                    if not found then table.insert(list, option_value) end
-                    self:update(list)
+                    if not found then table.insert(next_list, option_value) end
+                    manager:update(next_list)
                 else
-                    self:update(option_value)
-                    if manager._state then manager:unfold_settings() end
+                    manager:update(option_value)
+                    close_list()
                 end
             end)
 
-            option_buttons[option_value] = { mark = mark, label = label, button = option }
+            option_buttons[option_value] = { mark = mark, button = option }
         end
     end
 
     function manager:set_options(new_options)
         rebuild(new_options)
-        self._module:refresh()
+        if manager._state then place_list() end
     end
 
     function manager:New(value)
@@ -4137,28 +4379,30 @@ function ModuleManager:create_dropdown(settings)
     box.MouseButton1Click:Connect(function()
         manager:unfold_settings()
     end)
+    catcher.MouseButton1Click:Connect(close_list)
 
     rebuild(options)
 
     local initial
-    if settings.flag and self._library._config._flags[settings.flag] ~= nil then
-        initial = self._library._config._flags[settings.flag]
+    if settings.flag and library._config._flags[settings.flag] ~= nil then
+        initial = library._config._flags[settings.flag]
     elseif settings.multi_dropdown then
         initial = {}
     else
         initial = settings.value or options[1]
     end
+    manager._value = initial
     current_label.Text = display(initial)
     refresh_selection(initial)
-    if settings.flag and self._library._config._flags[settings.flag] == nil then
-        self._library._config._flags[settings.flag] = initial
+    if settings.flag and library._config._flags[settings.flag] == nil then
+        library._config._flags[settings.flag] = initial
     end
 
     bind_fn(function()
         if not frame.Parent then return end
         local value = initial
         if settings.flag then
-            value = self._library._config._flags[settings.flag]
+            value = library._config._flags[settings.flag]
         end
         refresh_selection(value)
     end)
@@ -4452,6 +4696,17 @@ function ModuleManager:create_colorpicker(settings)
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     }, sv_marker)
 
+    -- Buttons always receive InputBegan; a bare Frame does not unless it is
+    -- made Active. These transparent overlays make the picker draggable.
+    local sv_hit = create('TextButton', {
+        Name = 'SVHit',
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = '',
+        AutoButtonColor = false,
+        ZIndex = 11
+    }, sv)
+
     local hue_bar = create('Frame', {
         Name = 'Hue',
         Size = UDim2.fromOffset(120, 12),
@@ -4480,6 +4735,15 @@ function ModuleManager:create_colorpicker(settings)
         ZIndex = 8
     }, hue_bar)
     corner(hue_marker, 2)
+
+    local hue_hit = create('TextButton', {
+        Name = 'HueHit',
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        Text = '',
+        AutoButtonColor = false,
+        ZIndex = 9
+    }, hue_bar)
 
     local hex_box = create('TextBox', {
         Name = 'Hex',
@@ -4584,7 +4848,7 @@ function ModuleManager:create_colorpicker(settings)
         paint(Color3.fromHSV(hue, sat, val), false)
     end
 
-    sv.InputBegan:Connect(function(input)
+    sv_hit.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
         local mouse = UserInputService:GetMouseLocation()
         update_sv(mouse.X, mouse.Y)
@@ -4598,10 +4862,11 @@ function ModuleManager:create_colorpicker(settings)
             Connections:disconnect('picker_sv')
             Connections:disconnect('picker_sv_end')
             paint(Color3.fromHSV(hue, sat, val), true)
+            self._library:status((settings.title or 'Colour') .. ' · ' .. hex(Color3.fromHSV(hue, sat, val)), 'info')
         end)
     end)
 
-    hue_bar.InputBegan:Connect(function(input)
+    hue_hit.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
         local mouse = UserInputService:GetMouseLocation()
         update_hue(mouse.X)
@@ -4615,6 +4880,7 @@ function ModuleManager:create_colorpicker(settings)
             Connections:disconnect('picker_hue')
             Connections:disconnect('picker_hue_end')
             paint(Color3.fromHSV(hue, sat, val), true)
+            self._library:status((settings.title or 'Colour') .. ' · ' .. hex(Color3.fromHSV(hue, sat, val)), 'info')
         end)
     end)
 
@@ -4667,6 +4933,13 @@ function ModuleManager:create_colorpicker(settings)
         initial = settings.color
     end
     paint(initial, false, false)
+
+    manager._frame = frame
+    manager._sv = sv
+    manager._sv_hit = sv_hit
+    manager._hue_bar = hue_bar
+    manager._hue_hit = hue_hit
+    manager._swatch = swatch
 
     self:refresh()
     return manager
@@ -4781,6 +5054,8 @@ function Library:destroy()
     self._search_items = {}
     self._active_tab = nil
     self._search_text = ''
+    self._open_dropdown = nil
+    self._status_token = (self._status_token or 0) + 1
     self._ui_open = false
 end
 
