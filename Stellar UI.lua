@@ -1098,46 +1098,87 @@ function Library.create_loader(self, settings)
         tween(backdrop, 0.4, { BackgroundTransparency = settings.backdrop_transparency or 0.15 })
     end
 
-    -- Ambient sparkles drifting slowly behind the logo. Each one fades in,
-    -- drifts upward, fades out, then respawns elsewhere.
+    -- Ambient "sky" weather behind the logo: rain streaks or snow drifting
+    -- down the whole viewport, rather than dust rising from the centre.
+    -- `settings.weather` accepts 'rain' | 'snow' | false.
     local particle_layer = create('Frame', {
         Name = 'ParticleLayer',
         Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1,
+        ClipsDescendants = true,
         ZIndex = 1
     }, gui)
 
-    local function spawn_particle()
-        local dot = create('Frame', {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Size = UDim2.fromOffset(rng:NextNumber(2, 4), rng:NextNumber(2, 4)),
-            Position = UDim2.new(rng:NextNumber(0.35, 0.65), 0, rng:NextNumber(0.4, 0.7), 0),
-            BackgroundColor3 = accent,
-            BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            ZIndex = 1
-        }, particle_layer)
-        corner(dot, 0, 1)
+    local weather = settings.weather
+    if weather == nil then weather = 'rain' end
+    local weather_count = tonumber(settings.weather_count)
+        or (weather == 'snow' and 60 or 48)
 
-        task.spawn(function()
-            while particles_alive and dot and dot.Parent do
-                local target_y = dot.Position.Y.Scale - rng:NextNumber(0.05, 0.12)
-                tween(dot, rng:NextNumber(2, 3.2), {
-                    BackgroundTransparency = rng:NextNumber(0.3, 0.6),
-                    Position = UDim2.new(dot.Position.X.Scale, 0, target_y, 0)
-                }, Enum.EasingStyle.Sine)
-                task.wait(rng:NextNumber(2, 3.2))
-                if not (particles_alive and dot and dot.Parent) then break end
-                tween(dot, 0.8, { BackgroundTransparency = 1 }, Enum.EasingStyle.Sine, Enum.EasingDirection.In)
-                task.wait(0.8)
-                if dot and dot.Parent then
-                    dot.Position = UDim2.new(rng:NextNumber(0.3, 0.7), 0, rng:NextNumber(0.55, 0.75), 0)
+    -- One particle falls top-to-bottom on a loop. Rain is a thin, fast streak
+    -- that fades toward its tail; snow is a slow dot with a gentle sideways
+    -- sway. Everything is parented to the full-screen layer so it reads as a
+    -- sky rather than a burst from the middle.
+    local function spawn_weather_particle()
+        if weather == false or weather == 'none' then return end
+
+        if weather == 'snow' then
+            local flake = create('Frame', {
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Size = UDim2.fromOffset(rng:NextNumber(2, 4), rng:NextNumber(2, 4)),
+                Position = UDim2.new(rng:NextNumber(-0.02, 1.02), 0, rng:NextNumber(-0.2, 1), 0),
+                BackgroundColor3 = accent,
+                BackgroundTransparency = rng:NextNumber(0.25, 0.7),
+                BorderSizePixel = 0,
+                ZIndex = 1
+            }, particle_layer)
+            corner(flake, 0, 1)
+
+            task.spawn(function()
+                local duration = rng:NextNumber(4.5, 9)
+                while particles_alive and flake and flake.Parent do
+                    local x = rng:NextNumber(-0.02, 1.02)
+                    flake.Position = UDim2.new(x, 0, -0.1, 0)
+                    tween(flake, duration, {
+                        Position = UDim2.new(x + rng:NextNumber(-0.05, 0.05), 0, 1.1, 0)
+                    }, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+                    task.wait(duration)
+                    if not (particles_alive and flake and flake.Parent) then break end
+                    task.wait(rng:NextNumber(0, 1.5))
                 end
-            end
-        end)
+            end)
+        else
+            local streak = create('Frame', {
+                Size = UDim2.fromOffset(rng:NextNumber(1, 2), rng:NextNumber(9, 20)),
+                Position = UDim2.new(rng:NextNumber(-0.02, 1.02), 0, rng:NextNumber(-0.2, 1), 0),
+                BackgroundColor3 = accent,
+                BackgroundTransparency = rng:NextNumber(0.45, 0.8),
+                BorderSizePixel = 0,
+                ZIndex = 1
+            }, particle_layer)
+            corner(streak, 1, 1)
+            -- Fade the tail so each streak reads as a falling drop of light.
+            gradient(streak, ColorSequence.new(accent), 90, NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.1),
+                NumberSequenceKeypoint.new(1, 1)
+            }))
+
+            task.spawn(function()
+                local duration = rng:NextNumber(0.65, 1.35)
+                while particles_alive and streak and streak.Parent do
+                    local x = rng:NextNumber(-0.02, 1.02)
+                    streak.Position = UDim2.new(x, 0, -0.1, 0)
+                    tween(streak, duration, {
+                        Position = UDim2.new(x + rng:NextNumber(-0.02, 0.02), 0, 1.1, 0)
+                    }, Enum.EasingStyle.Linear)
+                    task.wait(duration)
+                    if not (particles_alive and streak and streak.Parent) then break end
+                    task.wait(rng:NextNumber(0, 1.2))
+                end
+            end)
+        end
     end
 
-    for _ = 1, 12 do spawn_particle() end
+    for _ = 1, weather_count do spawn_weather_particle() end
 
     local container = create('Frame', {
         Name = 'LoaderContainer',
@@ -1512,6 +1553,20 @@ function Library.create_loader(self, settings)
         if glow then glow.Visible = false end
         if ring then ring.Visible = false end
         if ring_stroke then ring_stroke.Transparency = 1 end
+
+        -- Fade the falling weather out with the backdrop, then hide the whole
+        -- layer. Without this the last drops would keep falling over the
+        -- closing panel and read as leftover artefacts.
+        if particle_layer then
+            for _, drop in ipairs(particle_layer:GetDescendants()) do
+                if drop:IsA('GuiObject') then
+                    tween(drop, 0.2, { BackgroundTransparency = 1 })
+                end
+            end
+            task.delay(0.22, function()
+                if particle_layer then particle_layer.Visible = false end
+            end)
+        end
 
         tween(backdrop, 0.4, { BackgroundTransparency = 1 })
         tween(container, 0.3, { Position = UDim2.fromScale(0.5, 0.54) }, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
@@ -2469,8 +2524,8 @@ function Library:create_ui()
     end
 
     function self:change_visiblity(state)
-        -- A floating dropdown menu must never outlive the window it belongs
-        -- to; close it whenever the interface is minimized or reopened.
+        -- Collapse any open dropdown accordion whenever the interface is
+        -- minimized or reopened, so the card is not left half-expanded.
         if self._open_dropdown then
             self._open_dropdown:unfold_settings()
         end
@@ -4003,11 +4058,15 @@ function ModuleManager:create_slider(settings)
         return manager._value
     end
 
-    local function update_from_mouse()
-        local mouse = UserInputService:GetMouseLocation()
+    local function update_from_mouse(pixel_x)
+        -- `pixel_x` comes from InputObject.Position, which matches
+        -- AbsolutePosition. Fall back to GetMouseLocation only when needed.
+        if pixel_x == nil then
+            pixel_x = UserInputService:GetMouseLocation().X
+        end
         local track_x = track.AbsolutePosition.X
         local track_width = math.max(1, track.AbsoluteSize.X)
-        local alpha = math.clamp((mouse.X - track_x) / track_width, 0, 1)
+        local alpha = math.clamp((pixel_x - track_x) / track_width, 0, 1)
         apply(minimum + (maximum - minimum) * alpha, false, true)
     end
 
@@ -4023,12 +4082,12 @@ function ModuleManager:create_slider(settings)
         end
         dragging = true
         tween(knob, 0.15, { Size = UDim2.fromOffset(15, 15) }, Enum.EasingStyle.Back)
-        update_from_mouse()
+        update_from_mouse(input.Position.X)
 
         cleanup_slider()
         Connections[slider_id .. '_move'] = UserInputService.InputChanged:Connect(function(move_input)
             if move_input.UserInputType == Enum.UserInputType.MouseMovement or move_input.UserInputType == Enum.UserInputType.Touch then
-                update_from_mouse()
+                update_from_mouse(move_input.Position.X)
             end
         end)
 
@@ -4089,7 +4148,7 @@ function ModuleManager:create_dropdown(settings)
 
     local function list_height_for(count)
         count = math.min(count, max_visible)
-        if count <= 0 then return 8 end
+        if count <= 0 then return 0 end
         return count * option_height + (count - 1) * option_gap + 8
     end
 
@@ -4147,44 +4206,27 @@ function ModuleManager:create_dropdown(settings)
         end
     end)
 
-    -- The menu floats in the ScreenGui rather than living inside the card.
-    -- A module card clips its descendants, and an option list buried in that
-    -- hierarchy can be clipped away or covered by a sibling card. Parenting
-    -- the menu to the ScreenGui keeps every option on top and clickable no
-    -- matter how the card is laid out or scrolled.
-    local overlay = create('Frame', {
-        Name = 'DropdownOverlay',
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        Visible = false,
-        ZIndex = 400
-    }, library._refs.Stellar)
-
-    -- Full-screen catcher so a click anywhere outside the menu dismisses it.
-    local catcher = create('TextButton', {
-        Name = 'Catcher',
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        Text = '',
-        AutoButtonColor = false,
-        ZIndex = 400
-    }, overlay)
-
+    -- Classic Stellar accordion: the option list expands *inside* the card,
+    -- directly under the box. The dropdown row grows and `refresh()` grows the
+    -- module card with it, so the list is never clipped and the cards below
+    -- slide down naturally.
     local list = create('ScrollingFrame', {
         Name = 'List',
-        Size = UDim2.fromOffset(BODY_W, 0),
+        Size = UDim2.new(1, 0, 0, 0),
+        Position = UDim2.fromOffset(0, row_height),
         BackgroundColor3 = Theme.Panel_3,
         BackgroundTransparency = 0.02,
         BorderSizePixel = 0,
         ClipsDescendants = true,
+        Visible = false,
         ScrollBarThickness = 3,
         ScrollBarImageColor3 = Theme.Accent,
         ScrollBarImageTransparency = 0.4,
         CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y,
         Active = true,
-        ZIndex = 401
-    }, overlay)
+        ZIndex = 5
+    }, frame)
     corner(list, 8)
     local list_stroke = stroke(list, Theme.Border, 1, 0.35)
     list_layout(list, { Padding = UDim.new(0, option_gap) })
@@ -4193,10 +4235,10 @@ function ModuleManager:create_dropdown(settings)
     bind(list_stroke, 'Color', 'Border')
 
     -- Exposed for introspection / tests.
-    manager._overlay = overlay
     manager._list = list
     manager._box = box
     manager._frame = frame
+    manager._box_stroke = box_stroke
 
     local option_buttons = {}
 
@@ -4246,31 +4288,24 @@ function ModuleManager:create_dropdown(settings)
         library:status((settings.title or 'Dropdown') .. ': ' .. display(value), 'info')
     end
 
+    -- The row is `row_height` tall when closed; opening adds the list height.
+    -- The row size is applied instantly and `refresh()` animates the card, so
+    -- the card visibly unfolds to reveal the options.
+    local function apply_open_size()
+        local list_h = manager._state and list_height_for(#options) or 0
+        list.Size = UDim2.new(1, 0, 0, list_h)
+        frame.Size = UDim2.new(0, BODY_W, 0, row_height + list_h)
+        self:refresh()
+    end
+
     local function close_list()
         if not manager._state then return end
         manager._state = false
         if library._open_dropdown == manager then library._open_dropdown = nil end
-        overlay.Visible = false
+        list.Visible = false
+        apply_open_size()
         tween(chevron_holder, 0.25, { Rotation = 0 })
         tween(box_stroke, 0.2, { Color = Theme.Border, Transparency = 0.4 })
-    end
-
-    local function place_list()
-        local box_position = box.AbsolutePosition
-        local box_size = box.AbsoluteSize
-        local height = list_height_for(#options)
-        local x = box_position.X
-        local y = box_position.Y + box_size.Y + 4
-        local container = library._refs.Container
-        if container then
-            local cpos = container.AbsolutePosition
-            local csize = container.AbsoluteSize
-            if y + height > cpos.Y + csize.Y - 8 then
-                y = math.max(cpos.Y + 8, box_position.Y - height - 4)
-            end
-        end
-        list.Position = UDim2.fromOffset(math.floor(x), math.floor(y))
-        list.Size = UDim2.fromOffset(math.floor(box_size.X), height)
     end
 
     function manager:unfold_settings()
@@ -4283,8 +4318,8 @@ function ModuleManager:create_dropdown(settings)
         end
         manager._state = true
         library._open_dropdown = manager
-        place_list()
-        overlay.Visible = true
+        list.Visible = true
+        apply_open_size()
         tween(chevron_holder, 0.25, { Rotation = 180 })
         tween(box_stroke, 0.2, { Color = Theme.Accent, Transparency = 0.2 })
     end
@@ -4310,7 +4345,7 @@ function ModuleManager:create_dropdown(settings)
                 TextXAlignment = Enum.TextXAlignment.Left,
                 Text = text,
                 AutoButtonColor = false,
-                ZIndex = 402
+                ZIndex = 6
             }, list)
             corner(option, 6)
             padding(option, 0, 8, 0, 8)
@@ -4323,7 +4358,7 @@ function ModuleManager:create_dropdown(settings)
                 AnchorPoint = Vector2.new(1, 0.5),
                 BackgroundTransparency = 1,
                 Visible = false,
-                ZIndex = 403
+                ZIndex = 7
             }, option)
             draw_check(mark, Theme.Accent, 1.6)
             bind_fn(function()
@@ -4366,7 +4401,7 @@ function ModuleManager:create_dropdown(settings)
 
     function manager:set_options(new_options)
         rebuild(new_options)
-        if manager._state then place_list() end
+        if manager._state then apply_open_size() end
     end
 
     function manager:New(value)
@@ -4379,7 +4414,6 @@ function ModuleManager:create_dropdown(settings)
     box.MouseButton1Click:Connect(function()
         manager:unfold_settings()
     end)
-    catcher.MouseButton1Click:Connect(close_list)
 
     rebuild(options)
 
@@ -4850,12 +4884,13 @@ function ModuleManager:create_colorpicker(settings)
 
     sv_hit.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local mouse = UserInputService:GetMouseLocation()
-        update_sv(mouse.X, mouse.Y)
+        -- Use the input's own position: it shares AbsolutePosition's coordinate
+        -- space. UserInputService:GetMouseLocation() is offset from the GUI by
+        -- the top-bar inset, which dragged the value straight to black.
+        update_sv(input.Position.X, input.Position.Y)
         Connections['picker_sv'] = UserInputService.InputChanged:Connect(function(move)
             if move.UserInputType == Enum.UserInputType.MouseMovement or move.UserInputType == Enum.UserInputType.Touch then
-                local m = UserInputService:GetMouseLocation()
-                update_sv(m.X, m.Y)
+                update_sv(move.Position.X, move.Position.Y)
             end
         end)
         Connections['picker_sv_end'] = UserInputService.InputEnded:Connect(function()
@@ -4868,12 +4903,10 @@ function ModuleManager:create_colorpicker(settings)
 
     hue_hit.InputBegan:Connect(function(input)
         if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
-        local mouse = UserInputService:GetMouseLocation()
-        update_hue(mouse.X)
+        update_hue(input.Position.X)
         Connections['picker_hue'] = UserInputService.InputChanged:Connect(function(move)
             if move.UserInputType == Enum.UserInputType.MouseMovement or move.UserInputType == Enum.UserInputType.Touch then
-                local m = UserInputService:GetMouseLocation()
-                update_hue(m.X)
+                update_hue(move.Position.X)
             end
         end)
         Connections['picker_hue_end'] = UserInputService.InputEnded:Connect(function()
