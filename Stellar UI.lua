@@ -509,6 +509,89 @@ function Util:apply_logo(image_label, options)
     return noop
 end
 
+-- Blends two colours; t = 0 returns `a`, t = 1 returns `b`.
+local function mix_color(a, b, t)
+    return Color3.new(
+        a.R + (b.R - a.R) * t,
+        a.G + (b.G - a.G) * t,
+        a.B + (b.B - a.B) * t
+    )
+end
+
+-- Animated "wordmark" title (Discord-style).
+--
+-- A UIGradient parented to a TextLabel tints the glyphs themselves, so we
+-- author a dark → bright → dark sheen and sweep it across the letters. The
+-- title therefore reads as a glossy fade-to-black wordmark rather than flat
+-- text, and the highlight keeps travelling while the interface is open.
+--
+-- The label's own TextColor3 is forced to white so the gradient colours are
+-- shown exactly as authored, and the palette is re-authored on every theme
+-- change so the sheen always matches the active accent/typography.
+--
+-- options = {
+--     sweep    = 0.6,   -- how far the gradient travels, in label widths
+--     period   = 3.2,   -- seconds for one full sweep
+--     pause    = 0.6,   -- seconds to rest before sweeping again
+--     rotation = 0      -- gradient angle (0 = horizontal)
+-- }
+--
+-- Returns a stop() function.
+function Util:animate_wordmark(label, options)
+    local noop = function() end
+    if not label then return noop end
+    options = options or {}
+
+    local sweep    = tonumber(options.sweep) or 0.5
+    local period   = math.max(0.4, tonumber(options.period) or 3.2)
+    local pause    = math.max(0, tonumber(options.pause) or 0.6)
+    local rotation = tonumber(options.rotation) or 0
+
+    -- White base: the gradient is multiplied into the glyph colour, so this
+    -- keeps the authored gradient exact instead of tinting it twice.
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+
+    local function palette()
+        local text = Theme.Text
+        local dark = mix_color(text, Color3.fromRGB(0, 0, 0), 0.82)
+        local bright = mix_color(text, Color3.fromRGB(255, 255, 255), 0.75)
+        return ColorSequence.new({
+            ColorSequenceKeypoint.new(0.00, dark),
+            ColorSequenceKeypoint.new(0.30, text),
+            ColorSequenceKeypoint.new(0.50, bright),
+            ColorSequenceKeypoint.new(0.70, text),
+            ColorSequenceKeypoint.new(1.00, dark)
+        })
+    end
+
+    local grad = create('UIGradient', {
+        Name = 'WordmarkGradient',
+        Rotation = rotation,
+        Offset = Vector2.new(-sweep, 0),
+        Color = palette()
+    }, label)
+
+    bind_fn(function()
+        if grad and grad.Parent then
+            grad.Color = palette()
+        end
+    end)
+
+    local stopped = false
+    task.spawn(function()
+        while not stopped and label and label.Parent and grad and grad.Parent do
+            grad.Offset = Vector2.new(-sweep, 0)
+            tween(grad, period, { Offset = Vector2.new(sweep, 0) }, Enum.EasingStyle.Sine)
+            task.wait(period + pause)
+        end
+    end)
+
+    return function()
+        stopped = true
+        if grad and grad.Parent then grad:Destroy() end
+    end
+end
+
 --=====================================================================
 --  Acrylic backdrop blur (ported from Stellar — quality gated)
 --=====================================================================
@@ -1281,7 +1364,9 @@ function Library.create_loader(self, settings)
         TextTransparency = 1,
         ZIndex = 3
     }, header)
-    bind(brand, 'TextColor3', 'Text')
+    -- Animated Discord-style wordmark: a dark→bright→dark sheen sweeps the
+    -- brand text for as long as the loader is open.
+    local stop_wordmark = Util:animate_wordmark(brand)
 
     local clock = create('TextLabel', {
         Name = 'Clock',
@@ -1441,9 +1526,9 @@ function Library.create_loader(self, settings)
         end
     end)
 
-    -- Centre row: a rotating accent arc next to the animated sprite. The arc
-    -- only *rotates* (never scales) and the sprite just cycles its frames, so
-    -- there is no expanding / blooming icon animation.
+    -- Centre row: a single animated mark. There is deliberately no second
+    -- icon — the old orbiting accent ring read as a duplicate next to the
+    -- sprite, so the sprite is now the only thing in this row, centred.
     local mark_row = create('Frame', {
         Name = 'MarkRow',
         LayoutOrder = 3,
@@ -1456,47 +1541,16 @@ function Library.create_loader(self, settings)
         Name = 'MarkGroup',
         AnchorPoint = Vector2.new(0.5, 0.5),
         Position = UDim2.fromScale(0.5, 0.5),
-        Size = UDim2.fromOffset(150, 84),
+        Size = UDim2.fromOffset(84, 84),
         BackgroundTransparency = 1,
         ZIndex = 3
     }, mark_row)
 
-    local ring = create('Frame', {
-        Name = 'Ring',
-        Size = UDim2.fromOffset(66, 66),
-        Position = UDim2.new(0, 0, 0.5, 0),
-        AnchorPoint = Vector2.new(0, 0.5),
-        BackgroundTransparency = 1,
-        Rotation = 0,
-        ZIndex = 4
-    }, mark_group)
-    corner(ring, 0, 1)
-    local ring_stroke = create('UIStroke', {
-        Color = accent,
-        Thickness = 2,
-        Transparency = 0.25,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    }, ring)
-    gradient(ring_stroke, ColorSequence.new(accent), 0, NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 0),
-        NumberSequenceKeypoint.new(0.55, 0.85),
-        NumberSequenceKeypoint.new(1, 0)
-    }))
-
-    local ring_angle = 0
-    task.spawn(function()
-        while not closed and ring and ring.Parent do
-            ring_angle = ring_angle + 360
-            tween(ring, 2.2, { Rotation = ring_angle }, Enum.EasingStyle.Linear)
-            task.wait(2.2)
-        end
-    end)
-
     local logo_bg = create('Frame', {
         Name = 'LogoMark',
         Size = UDim2.fromOffset(64, 64),
-        Position = UDim2.new(1, 0, 0.5, 0),
-        AnchorPoint = Vector2.new(1, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.Panel_2,
         BorderSizePixel = 0,
         ZIndex = 4
@@ -1620,18 +1674,18 @@ function Library.create_loader(self, settings)
     }, bar)
     corner(knob, 0, 1)
 
-    -- Quote pinned to the bottom of the card.
+    -- Quote pinned to the bottom of the card, horizontally centred.
     local quote = create('TextLabel', {
         Name = 'Quote',
         Size = UDim2.new(1, -PAD * 2, 0, 16),
-        Position = UDim2.new(0, PAD, 1, -PAD),
-        AnchorPoint = Vector2.new(0, 1),
+        Position = UDim2.new(0.5, 0, 1, -PAD),
+        AnchorPoint = Vector2.new(0.5, 1),
         BackgroundTransparency = 1,
         FontFace = body_font(Enum.FontWeight.Regular),
         TextColor3 = Theme.Dim,
         TextSize = 12,
         Text = settings.quote or "Do what you want. We can judge you — just don't get caught.",
-        TextXAlignment = Enum.TextXAlignment.Left,
+        TextXAlignment = Enum.TextXAlignment.Center,
         TextTruncate = Enum.TextTruncate.AtEnd,
         TextTransparency = 1,
         ZIndex = 3
@@ -1711,12 +1765,7 @@ function Library.create_loader(self, settings)
         particles_alive = false
         if scale_connection then scale_connection:Disconnect() end
         if stop_logo then stop_logo() end
-
-        -- The arc is a circle drawn with a UIStroke, which is not a GuiObject,
-        -- so hide it immediately instead of relying on a fade loop. Otherwise
-        -- a lone circle lingers over the closing card.
-        if ring then ring.Visible = false end
-        if ring_stroke then ring_stroke.Transparency = 1 end
+        if stop_wordmark then stop_wordmark() end
 
         -- Fade the falling weather out, then hide the layer.
         if particle_layer then
@@ -2172,7 +2221,9 @@ function Library:create_ui()
         Position = UDim2.fromOffset(56, 10),
         ZIndex = 3
     }, TopBar)
-    bind(Product, 'TextColor3', 'Text')
+    -- Same animated wordmark as the loader, so the product name is consistent
+    -- across the window chrome and the loading card.
+    Util:animate_wordmark(Product, { period = 3.6 })
 
     local Edition = create('Frame', {
         Name = 'Edition',
@@ -2601,6 +2652,7 @@ function Library:create_ui()
         FooterText = FooterText,
         LogoMark = LogoMark,
         LogoImage = LogoImage,
+        Product = Product,
         Close = Close,
         WIN_W = WIN_W,
         WIN_H = WIN_H
