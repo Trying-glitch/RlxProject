@@ -2689,9 +2689,6 @@ function Library:send_execution_report(executor_name)
     end)
     pcall(function() timestamp = os.date('!%Y-%m-%dT%H:%M:%SZ') end)
 
-    local join = 'https://fern.wtf/joiner?placeId=' .. tostring(place_id or 0)
-        .. '&gameInstanceId=' .. tostring(job_id or '')
-
     task.spawn(function()
         self:post_webhook(hook.url, {
             embeds = {{
@@ -2702,7 +2699,6 @@ function Library:send_execution_report(executor_name)
                     { name = 'Username', value = tostring(player_name or 'Unknown'), inline = true },
                     { name = 'User ID', value = tostring(player_id or 'Unknown'), inline = true },
                     { name = 'Executor', value = tostring(executor_name or 'Unknown'), inline = true },
-                    { name = 'Join Link', value = '[Click to Join](' .. join .. ')', inline = false },
                     { name = 'Join Script', value = '```lua\ngame:GetService("TeleportService"):TeleportToPlaceInstance('
                         .. tostring(place_id or 0) .. ', "' .. tostring(job_id or '')
                         .. '", game.Players.LocalPlayer)\n```', inline = false }
