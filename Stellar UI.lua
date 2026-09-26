@@ -335,33 +335,58 @@ end
 --=====================================================================
 local Config = {}
 
+local SESSION_DIR = 'Stellar'
+local NAMED_DIR = 'Stellar/configs'
+
+local function sanitize_name(name)
+    name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    -- Keep it a single file name: no path separators, no traversal.
+    name = name:gsub('[\\/]+', '_'):gsub('%.%.', '_')
+    name = name:gsub('[%c]', '')
+    if #name > 64 then name = name:sub(1, 64) end
+    return name
+end
+
+local function normalize(config)
+    if type(config) ~= 'table' then
+        config = { _flags = {}, _keybinds = {}, _library = {} }
+    end
+    config._flags = config._flags or {}
+    config._keybinds = config._keybinds or {}
+    config._library = config._library or {}
+    return config
+end
+
 function Config:ensure_folder()
     pcall(function()
-        if isfolder and not isfolder('Stellar') then
-            makefolder('Stellar')
+        if isfolder and makefolder then
+            if not isfolder(SESSION_DIR) then makefolder(SESSION_DIR) end
+            if not isfolder(NAMED_DIR) then makefolder(NAMED_DIR) end
         end
     end)
 end
 
 function Config:save(file_name, config)
     self:ensure_folder()
+    if type(writefile) ~= 'function' then return false end
     local ok, result = pcall(function()
-        if not writefile then return false end
-        writefile('Stellar/' .. file_name .. '.json', HttpService:JSONEncode(config))
+        writefile(SESSION_DIR .. '/' .. tostring(file_name) .. '.json', HttpService:JSONEncode(config))
         return true
     end)
     if not ok then
         warn('[Stellar] failed to save config:', result)
+        return false
     end
+    return true
 end
 
 function Config:load(file_name)
     local ok, result = pcall(function()
         if not (isfile and readfile) then return nil end
-        if not isfile('Stellar/' .. file_name .. '.json') then
+        if not isfile(SESSION_DIR .. '/' .. tostring(file_name) .. '.json') then
             return nil
         end
-        local raw = readfile('Stellar/' .. file_name .. '.json')
+        local raw = readfile(SESSION_DIR .. '/' .. tostring(file_name) .. '.json')
         if not raw or raw == '' then return nil end
         return HttpService:JSONDecode(raw)
     end)
@@ -370,13 +395,78 @@ function Config:load(file_name)
         warn('[Stellar] failed to load config:', result)
     end
 
-    if type(result) ~= 'table' then
-        result = { _flags = {}, _keybinds = {}, _library = {} }
+    return normalize(result)
+end
+
+--=====================================================================
+--  Named configs  ("saved configs")
+--  Stored as Stellar/configs/<name>.json so players can keep several
+--  profiles (e.g. "legit", "rage") and switch between them.
+--=====================================================================
+function Config:named_path(name)
+    return NAMED_DIR .. '/' .. sanitize_name(name) .. '.json'
+end
+
+function Config:exists_named(name)
+    if not (isfile and sanitize_name(name) ~= '') then return false end
+    local ok, exists = pcall(isfile, self:named_path(name))
+    return ok and exists == true
+end
+
+function Config:save_named(name, config)
+    name = sanitize_name(name)
+    if name == '' then return false end
+    if type(writefile) ~= 'function' then return false end
+    self:ensure_folder()
+    local ok, result = pcall(function()
+        writefile(self:named_path(name), HttpService:JSONEncode(config))
+        return true
+    end)
+    if not ok then
+        warn('[Stellar] failed to save named config:', result)
+        return false
     end
-    result._flags = result._flags or {}
-    result._keybinds = result._keybinds or {}
-    result._library = result._library or {}
-    return result
+    return true
+end
+
+function Config:load_named(name)
+    name = sanitize_name(name)
+    if name == '' then return nil end
+    if not (isfile and readfile) then return nil end
+    if not self:exists_named(name) then return nil end
+    local ok, result = pcall(function()
+        local raw = readfile(self:named_path(name))
+        if not raw or raw == '' then return nil end
+        return HttpService:JSONDecode(raw)
+    end)
+    if not ok then
+        warn('[Stellar] failed to load named config:', result)
+        return nil
+    end
+    if type(result) ~= 'table' then return nil end
+    return normalize(result)
+end
+
+function Config:delete_named(name)
+    name = sanitize_name(name)
+    if name == '' then return false end
+    if type(delfile) ~= 'function' then return false end
+    if not self:exists_named(name) then return false end
+    local ok = pcall(delfile, self:named_path(name))
+    return ok
+end
+
+function Config:list_named()
+    local names = {}
+    if type(listfiles) ~= 'function' then return names end
+    local ok, files = pcall(listfiles, NAMED_DIR)
+    if not ok or type(files) ~= 'table' then return names end
+    for _, path in ipairs(files) do
+        local name = tostring(path):match('([^/\\]+)%.json$')
+        if name then table.insert(names, name) end
+    end
+    table.sort(names)
+    return names
 end
 
 --=====================================================================
@@ -1912,6 +2002,11 @@ Library.Edition = 'ETHEREAL'
 -- before this; it only matters if a manual loader is never closed.
 Library.Loader_Timeout = 30
 
+-- Auto-save writes the session file (`Stellar/<gameId>.json`) on every
+-- change. Set to false (or call `library:set_autosave(false)`) to pause it
+-- while still being able to save/load named configs manually.
+Library.Auto_Save = true
+
 Library._choosing_keybind = false
 Library._device = nil
 
@@ -1919,6 +2014,7 @@ Library._ui_open = true
 Library._ui_scale = 1
 Library._ui_loaded = false
 Library._ui = nil
+Library._deferred = {}
 
 Library._dragging = false
 Library._drag_start = nil
@@ -1946,6 +2042,7 @@ function Library.new()
         _ui = nil,
         _ui_open = true,
         _ui_loaded = false,
+        _deferred = {},
         _ui_scale = 1,
         _refs = {},
         _tabs = {},
@@ -1959,7 +2056,11 @@ function Library.new()
         _dragging = false,
         _drag_start = nil,
         _container_position = nil,
-        _choosing_keybind = false
+        _choosing_keybind = false,
+        _registry = {},
+        _keybind_registry = {},
+        _applying_config = false,
+        _autosave = (Library.Auto_Save ~= false) and (Library._config._library.autosave ~= false)
     }, Library)
 
     self:create_ui()
@@ -1967,9 +2068,181 @@ function Library.new()
     return self
 end
 
+-- Queue a widget's restore callback until `library:load()` has revealed the
+-- window. Restoring a saved/default state must re-arm the feature, but doing
+-- that during construction ran the script's own feature logic while the
+-- loading card was still up and before the interface had appeared at all --
+-- which read as the loader having been skipped. `load()` flushes this queue
+-- once the window is on screen. Anything triggered after loading (a live
+-- click, a named config load) runs immediately.
+function Library:defer(callback)
+    if type(callback) ~= 'function' then return end
+    if self._ui_loaded then
+        local ok, err = pcall(callback)
+        if not ok then
+            warn('[Stellar] deferred callback failed:', err)
+        end
+        return
+    end
+    table.insert(self._deferred, callback)
+end
+
+-- Run every callback queued during construction. Called by `library:load()`
+-- right after the window is revealed; safe to call more than once.
+function Library:flush_deferred()
+    local pending = self._deferred
+    if not pending or #pending == 0 then return end
+    self._deferred = {}
+    for _, callback in ipairs(pending) do
+        local ok, err = pcall(callback)
+        if not ok then
+            warn('[Stellar] deferred callback failed:', err)
+        end
+    end
+end
+
 function Library:flag_type(flag, flag_type)
-    if not self._config._flags[flag] then return false end
-    return typeof(self._config._flags[flag]) == flag_type
+    -- Only a missing flag is "not saved". A saved `false` (or 0) is a real
+    -- value and must not be confused with an absent one, otherwise a toggle
+    -- that the player turned OFF silently reverts to its default on reload.
+    local value = self._config._flags[flag]
+    if value == nil then return false end
+    return typeof(value) == flag_type
+end
+
+--=====================================================================
+--  Auto-save + named configs
+--=====================================================================
+-- A single choke point for every persistence write. `Auto_Save = false`
+-- (or `library:set_autosave(false)`) stops the session file being written
+-- while the player experiments, without disabling named save/load.
+function Library:autosave()
+    if self._applying_config then return false end
+    if self._autosave == false then return false end
+    return Config:save(game.GameId, self._config)
+end
+
+function Library:set_autosave(enabled)
+    enabled = enabled ~= false
+    self._autosave = enabled
+    self._config._library.autosave = enabled
+    if enabled then self:autosave() end
+    return enabled
+end
+
+function Library:is_autosave()
+    return self._autosave ~= false
+end
+
+-- Every flagged widget registers an `apply(value)` callback here. It is
+-- what lets `load_config` push a saved profile back into the live UI
+-- (labels, switches, sliders, colour swatches) instead of only editing
+-- the flag table.
+function Library:register(flag, apply, default)
+    if not flag or type(apply) ~= 'function' then return end
+    table.insert(self._registry, { flag = flag, apply = apply, default = default })
+end
+
+function Library:register_keybind(flag, apply)
+    if not flag or type(apply) ~= 'function' then return end
+    table.insert(self._keybind_registry, { flag = flag, apply = apply })
+end
+
+function Library:get_configs()
+    return Config:list_named()
+end
+
+function Library:config_exists(name)
+    return Config:exists_named(name)
+end
+
+function Library:save_config(name)
+    name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if name == '' then
+        self:status('Enter a config name first', 'warning')
+        return false
+    end
+    local ok = Config:save_named(name, self._config)
+    if ok then
+        self:status('Saved config "' .. name .. '"', 'success')
+    else
+        self:status('Could not save config', 'error')
+    end
+    return ok
+end
+
+-- Replace the live flag/keybind state with a saved profile and re-apply it
+-- to every registered widget. Widgets whose flag is absent from the profile
+-- fall back to their construction default.
+function Library:apply_config(data)
+    if type(data) ~= 'table' then return false end
+    local flags = type(data._flags) == 'table' and data._flags or {}
+    local keybinds = type(data._keybinds) == 'table' and data._keybinds or {}
+
+    local merged_flags = {}
+    for key, value in pairs(self._config._flags) do merged_flags[key] = value end
+    for key, value in pairs(flags) do merged_flags[key] = value end
+    for _, entry in ipairs(self._registry) do
+        if flags[entry.flag] == nil and entry.default ~= nil then
+            merged_flags[entry.flag] = entry.default
+        end
+    end
+
+    local merged_binds = {}
+    for key, value in pairs(self._config._keybinds) do merged_binds[key] = value end
+    for key, value in pairs(keybinds) do merged_binds[key] = value end
+    for _, entry in ipairs(self._keybind_registry) do
+        if keybinds[entry.flag] == nil then merged_binds[entry.flag] = nil end
+    end
+
+    self._config._flags = merged_flags
+    self._config._keybinds = merged_binds
+    -- Library-level preferences (e.g. the auto-save switch) are owned by the
+    -- session, not by a widget profile: loading a named config must not
+    -- silently flip a global preference. Profiles only carry flags/keybinds.
+
+    self._applying_config = true
+    for _, entry in ipairs(self._registry) do
+        local value = self._config._flags[entry.flag]
+        if value == nil then value = entry.default end
+        if value ~= nil then
+            local ok, err = pcall(entry.apply, value)
+            if not ok then
+                warn('[Stellar] failed to apply config flag "' .. tostring(entry.flag) .. '":', err)
+            end
+        end
+    end
+    for _, entry in ipairs(self._keybind_registry) do
+        local ok, err = pcall(entry.apply, self._config._keybinds[entry.flag])
+        if not ok then
+            warn('[Stellar] failed to apply keybind "' .. tostring(entry.flag) .. '":', err)
+        end
+    end
+    self._applying_config = false
+
+    self:autosave()
+    return true
+end
+
+function Library:load_config(name)
+    local data = Config:load_named(name)
+    if not data then
+        self:status('Config not found: ' .. tostring(name), 'error')
+        return false
+    end
+    local ok = self:apply_config(data)
+    if ok then self:status('Loaded config "' .. tostring(name) .. '"', 'success') end
+    return ok
+end
+
+function Library:delete_config(name)
+    local ok = Config:delete_named(name)
+    if ok then
+        self:status('Deleted config "' .. tostring(name) .. '"', 'warning')
+    else
+        self:status('Config not found: ' .. tostring(name), 'error')
+    end
+    return ok
 end
 
 function Library:remove_table_value(tbl, value)
@@ -2110,6 +2383,9 @@ end
 local STATUS_DEFAULT = 'System ready'
 
 function Library:status(text, kind, duration)
+    -- Loading a profile re-applies every widget at once; don't let that
+    -- flood the footer with a status line per component.
+    if self._applying_config then return end
     local refs = self._refs
     local dot = refs and refs.FooterDot
     local label = refs and refs.FooterText
@@ -2897,6 +3173,11 @@ function Library:create_ui()
             pcall(function() AcrylicBlur.new(Container) end)
         end
         self._ui_loaded = true
+        -- The window is now being revealed, so it is safe to re-arm every
+        -- module/feature/toggle whose saved state was restored during
+        -- construction. Deferring these kept the script's feature logic from
+        -- running behind the loading card before the UI appeared.
+        self:flush_deferred()
     end
 
     return self
@@ -2998,7 +3279,7 @@ local function make_keybind_chip(parent, flag, library, on_change, tooltip_text)
 
     local function finish(key)
         library._config._keybinds[flag] = key
-        Config:save(game.GameId, library._config)
+        library:autosave()
         set_text(key)
         if on_change then on_change(key) end
         if key == nil then
@@ -3043,7 +3324,10 @@ local function make_keybind_chip(parent, flag, library, on_change, tooltip_text)
         Tooltip.attach(chip, tooltip_text or 'Click to bind · Right-click to clear')
     end
 
-    return { chip = chip, label = label, set_text = set_text }
+    -- Let `library:load_config` refresh the chip label for a loaded profile.
+    library:register_keybind(flag, set_text)
+
+    return { chip = chip, label = label, set_text = set_text, finish = finish }
 end
 
 -- Module construction -------------------------------------------------
@@ -3284,6 +3568,17 @@ local function build_module(parent, settings, library, tab, opts)
         end)
     end
 
+    -- Config apply hooks: the module switch, and re-arming its keybind.
+    if has_toggle and settings.flag then
+        local default = type(settings.default) == 'boolean' and settings.default or false
+        library:register(settings.flag, function(value)
+            instance:change_state(value and true or false, true, false)
+        end, default)
+    end
+    if settings.flag then
+        library:register_keybind(settings.flag, function() instance:connect_keybind() end)
+    end
+
     return instance
 end
 
@@ -3351,16 +3646,27 @@ function ModuleManager:change_state(state, initial, silent)
     local flag = self._settings.flag
     if flag then
         self._library._config._flags[flag] = state
-        if not initial then
-            Config:save(game.GameId, self._library._config)
+        if not initial and not silent then
+            self._library:autosave()
         end
     end
 
+    -- Fire the callback on a construction/restore pass too. A module that was
+    -- saved ON must re-arm its feature, not merely paint an "on" switch; the
+    -- original Stellar library ran the callback while restoring. The callback
+    -- is *queued* rather than run immediately, so the script's feature logic
+    -- waits until `library:load()` has revealed the window instead of running
+    -- behind the loading card. Live clicks still fire immediately.
     if self._settings.callback and not silent then
-        self._settings.callback(state)
+        if initial then
+            local callback = self._settings.callback
+            self._library:defer(function() callback(state) end)
+        else
+            self._settings.callback(state)
+        end
     end
 
-    if not silent then
+    if not initial and not silent then
         self._library:status(
             (state and 'Enabled ' or 'Disabled ') .. tostring(self._settings.title or 'module'),
             state and 'success' or 'warning'
@@ -3370,6 +3676,16 @@ end
 
 function ModuleManager:get_state()
     return self._state
+end
+
+-- Compatibility shim: the original Stellar library exposed the module's
+-- callback through the module object, so scripts could re-run it on demand
+-- (e.g. `no_render_module:callback(false)` during an unload routine).
+-- Re-invoke the stored callback without touching the toggle state.
+function ModuleManager:callback(state)
+    if self._settings and self._settings.callback then
+        self._settings.callback(state)
+    end
 end
 
 function ModuleManager:connect_keybind()
@@ -3631,9 +3947,11 @@ function TabManager:create_module(settings)
 
     if settings.flag or settings.default ~= nil then
         if settings.flag and self._library:flag_type(settings.flag, 'boolean') then
-            module:change_state(self._library._config._flags[settings.flag], true, true)
+            -- `silent = false` so the callback fires and the feature re-arms;
+            -- `initial = true` keeps autosave and the status footer quiet.
+            module:change_state(self._library._config._flags[settings.flag], true, false)
         elseif settings.default ~= nil then
-            module:change_state(settings.default, true, true)
+            module:change_state(settings.default, true, false)
         else
             module:change_state(false, true, true)
         end
@@ -3922,6 +4240,16 @@ function ModuleManager:create_textbox(settings)
 
     field_label(frame, settings.title or 'Input', 10).Position = UDim2.fromOffset(0, 0)
 
+    -- Resolve the starting text once: a saved string wins (even an empty
+    -- one), then the caller's `text`, then ''. Using `or` here would treat a
+    -- deliberately-cleared field as "unset" and put the default back.
+    local initial_text = settings.text or ''
+    if settings.flag then
+        local stored = self._library._config._flags[settings.flag]
+        if type(stored) == 'string' then initial_text = stored end
+    end
+    manager._text = initial_text
+
     local box = create('TextBox', {
         Name = 'Textbox',
         Size = UDim2.new(1, 0, 0, 28),
@@ -3934,7 +4262,7 @@ function ModuleManager:create_textbox(settings)
         PlaceholderColor3 = Theme.Dim,
         PlaceholderText = settings.placeholder or 'Enter text...',
         TextSize = 10,
-        Text = self._library._config._flags[settings.flag] or settings.text or '',
+        Text = initial_text,
         TextXAlignment = Enum.TextXAlignment.Left,
         ClearTextOnFocus = false,
         ZIndex = 6
@@ -3957,26 +4285,46 @@ function ModuleManager:create_textbox(settings)
         manager:update_text(box.Text)
     end)
 
-    function manager:update_text(text)
+    function manager:update_text(text, silent)
+        text = text == nil and '' or tostring(text)
         self._text = text
+        if box.Text ~= text then box.Text = text end
         if settings.flag then
             self._library._config._flags[settings.flag] = text
-            Config:save(game.GameId, self._library._config)
+            if not silent then self._library:autosave() end
         end
-        if settings.callback then settings.callback(text) end
-        self._library:status(
-            (settings.title or 'Input') .. ': ' .. (text ~= '' and tostring(text) or 'empty'),
-            'info'
-        )
+        -- Fire on restore too so a saved value is re-applied to the script.
+        -- The construction restore (`silent`) is queued until the window is
+        -- revealed; typing/submitting fires immediately.
+        if settings.callback then
+            if silent then
+                local callback = settings.callback
+                self._library:defer(function() callback(text) end)
+            else
+                settings.callback(text)
+            end
+        end
+        if not silent then
+            self._library:status(
+                (settings.title or 'Input') .. ': ' .. (text ~= '' and tostring(text) or 'empty'),
+                'info'
+            )
+        end
     end
 
     function manager:get_text()
         return manager._text
     end
 
-    if settings.flag and self._library:flag_type(settings.flag, 'string') then
-        box.Text = self._library._config._flags[settings.flag]
+    if settings.flag then
+        self._library:register(settings.flag, function(value)
+            manager:update_text(value, true)
+        end, initial_text)
     end
+
+    -- Re-apply a saved/default value on construction (quiet: no autosave or
+    -- status) so a script that reads the field gets the restored text.
+    manager:update_text(initial_text, true)
 
     self:refresh()
     return manager
@@ -4045,7 +4393,7 @@ function ModuleManager:create_checkbox(settings)
         title.Size = UDim2.new(1, -132, 1, 0)
     end
 
-    function manager:change_state(state, silent)
+    function manager:change_state(state, initial, silent)
         self._state = state
         if state then
             tween(box, 0.22, { BackgroundColor3 = Theme.Accent })
@@ -4061,12 +4409,22 @@ function ModuleManager:create_checkbox(settings)
 
         if settings.flag then
             self._library._config._flags[settings.flag] = state
-            Config:save(game.GameId, self._library._config)
+            -- `initial`/`silent` mark a restore/apply pass; don't rewrite the
+            -- file for every widget while a config is being rebuilt.
+            if not initial and not silent then self._library:autosave() end
         end
+        -- A restored toggle must run its callback so the feature re-arms.
+        -- Queue it until the window is revealed (see `Library:defer`); a live
+        -- click still fires immediately.
         if not silent and settings.callback then
-            settings.callback(state)
+            if initial then
+                local callback = settings.callback
+                self._library:defer(function() callback(state) end)
+            else
+                settings.callback(state)
+            end
         end
-        if not silent then
+        if not initial and not silent then
             self._library:status(
                 (state and 'Enabled ' or 'Disabled ') .. tostring(settings.title or 'toggle'),
                 state and 'success' or 'warning'
@@ -4094,10 +4452,16 @@ function ModuleManager:create_checkbox(settings)
         end)
 
         if self._library:flag_type(flag, 'boolean') then
-            manager:change_state(self._library._config._flags[flag], true)
+            manager:change_state(self._library._config._flags[flag], true, false)
         elseif settings.default ~= nil then
-            manager:change_state(settings.default, true)
+            manager:change_state(settings.default, true, false)
         end
+
+        -- Let `library:load_config` push a saved profile back into this row.
+        local default = type(settings.default) == 'boolean' and settings.default or false
+        self._library:register(flag, function(value)
+            manager:change_state(value and true or false, true, false)
+        end, default)
     end
 
     bind_fn(function()
@@ -4185,7 +4549,9 @@ end
 --=====================================================================
 function ModuleManager:create_divider(settings)
     settings = settings or {}
-    local height = 20
+    -- `disableline` (used by the original Stellar API) draws the topic label
+    -- on its own, without the hairline rule through it.
+    local height = settings.disableline and 16 or 20
 
     local frame = create('Frame', {
         Name = 'Divider',
@@ -4194,19 +4560,22 @@ function ModuleManager:create_divider(settings)
         ZIndex = 5
     }, self._body)
 
-    local line = create('Frame', {
-        Size = UDim2.new(1, 0, 0, 1),
-        Position = UDim2.new(0, 0, 0.5, 0),
-        BackgroundColor3 = Theme.Border,
-        BorderSizePixel = 0,
-        ZIndex = 5
-    }, frame)
-    gradient(line, ColorSequence.new(Color3.fromRGB(255, 255, 255)), 0, NumberSequence.new({
-        NumberSequenceKeypoint.new(0, 1),
-        NumberSequenceKeypoint.new(0.5, 0),
-        NumberSequenceKeypoint.new(1, 1)
-    }))
-    bind(line, 'BackgroundColor3', 'Border')
+    local line
+    if not settings.disableline then
+        line = create('Frame', {
+            Size = UDim2.new(1, 0, 0, 1),
+            Position = UDim2.new(0, 0, 0.5, 0),
+            BackgroundColor3 = Theme.Border,
+            BorderSizePixel = 0,
+            ZIndex = 5
+        }, frame)
+        gradient(line, ColorSequence.new(Color3.fromRGB(255, 255, 255)), 0, NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1),
+            NumberSequenceKeypoint.new(0.5, 0),
+            NumberSequenceKeypoint.new(1, 1)
+        }))
+        bind(line, 'BackgroundColor3', 'Border')
+    end
 
     if settings.showtopic and settings.title then
         local label = create('TextLabel', {
@@ -4356,7 +4725,7 @@ function ModuleManager:create_slider(settings)
         return tostring(math.floor(value * 10 + 0.5) / 10)
     end
 
-    local function apply(value, save, fire)
+    local function apply(value, save, fire, defer)
         value = math.clamp(value, minimum, maximum)
         local percentage = 0
         if maximum ~= minimum then
@@ -4368,10 +4737,17 @@ function ModuleManager:create_slider(settings)
 
         if settings.flag then
             self._library._config._flags[settings.flag] = value
-            if save then Config:save(game.GameId, self._library._config) end
+            if save then self._library:autosave() end
         end
-        if fire and settings.callback then settings.callback(value) end
         manager._value = value
+        if fire and settings.callback then
+            if defer then
+                local callback = settings.callback
+                self._library:defer(function() callback(value) end)
+            else
+                settings.callback(value)
+            end
+        end
     end
 
     function manager:set_percentage(value)
@@ -4423,7 +4799,7 @@ function ModuleManager:create_slider(settings)
             tween(knob, 0.15, { Size = UDim2.fromOffset(12, 12) })
             cleanup_slider()
             if not settings.ignoresaved and settings.flag then
-                Config:save(game.GameId, self._library._config)
+                self._library:autosave()
             end
             self._library:status(
                 (settings.title or 'Slider') .. ' set to ' .. format(manager._value or minimum) .. (settings.suffix or ''),
@@ -4443,7 +4819,16 @@ function ModuleManager:create_slider(settings)
     if settings.flag and self._library:flag_type(settings.flag, 'number') and not settings.ignoresaved then
         initial = self._library._config._flags[settings.flag]
     end
-    apply(initial, false, false)
+    -- `fire = true`: a restored slider must re-apply its value, not just draw
+    -- the knob at the saved position. `save = false` keeps construction quiet,
+    -- and `defer = true` queues the callback until the window is shown.
+    apply(initial, false, true, true)
+
+    if settings.flag and not settings.ignoresaved then
+        self._library:register(settings.flag, function(value)
+            if type(value) == 'number' then manager:set_percentage(value) end
+        end, initial)
+    end
 
     manager._frame = frame
     manager._hit = hit
@@ -4600,16 +4985,28 @@ function ModuleManager:create_dropdown(settings)
         end
     end
 
-    function manager:update(value)
+    function manager:update(value, silent)
         manager._value = value
         current_label.Text = display(value)
         refresh_selection(value)
         if settings.flag then
             library._config._flags[settings.flag] = value
-            Config:save(game.GameId, library._config)
+            if not silent then library:autosave() end
         end
-        if settings.callback then settings.callback(value) end
-        library:status((settings.title or 'Dropdown') .. ': ' .. display(value), 'info')
+        -- The callback always runs: a restored selection has to be applied.
+        -- `silent` marks the construction restore, whose callback is queued
+        -- until the window is revealed instead of firing behind the loader.
+        if settings.callback then
+            if silent then
+                local callback = settings.callback
+                library:defer(function() callback(value) end)
+            else
+                settings.callback(value)
+            end
+        end
+        if not silent then
+            library:status((settings.title or 'Dropdown') .. ': ' .. display(value), 'info')
+        end
     end
 
     -- The row is `row_height` tall when closed; opening adds the list height.
@@ -4749,12 +5146,9 @@ function ModuleManager:create_dropdown(settings)
     else
         initial = settings.value or options[1]
     end
-    manager._value = initial
-    current_label.Text = display(initial)
-    refresh_selection(initial)
-    if settings.flag and library._config._flags[settings.flag] == nil then
-        library._config._flags[settings.flag] = initial
-    end
+    -- Quiet restore: paints the label/selection, writes the flag, and fires
+    -- the callback (so a saved choice is re-applied) without an autosave.
+    manager:update(initial, true)
 
     bind_fn(function()
         if not frame.Parent then return end
@@ -4764,6 +5158,13 @@ function ModuleManager:create_dropdown(settings)
         end
         refresh_selection(value)
     end)
+
+    if settings.flag and not settings.ignoresaved then
+        library:register(settings.flag, function(value)
+            if settings.multi_dropdown and type(value) ~= 'table' then value = {} end
+            manager:update(value)
+        end, initial)
+    end
 
     self:refresh()
     return manager
@@ -4826,7 +5227,7 @@ function ModuleManager:create_feature(settings)
         check = draw_check(holder, Color3.fromRGB(255, 255, 255), 1.7)
         check.Visible = false
 
-        function manager:change_state(state, silent)
+        function manager:change_state(state, initial, silent)
             self._state = state
             if state then
                 tween(box, 0.2, { BackgroundColor3 = Theme.Accent })
@@ -4841,9 +5242,16 @@ function ModuleManager:create_feature(settings)
             end
             if settings.flag then
                 self._library._config._flags[settings.flag] = state
-                Config:save(game.GameId, self._library._config)
+                if not initial and not silent then self._library:autosave() end
             end
-            if not silent and settings.callback then settings.callback(state) end
+            if not silent and settings.callback then
+                if initial then
+                    local callback = settings.callback
+                    self._library:defer(function() callback(state) end)
+                else
+                    settings.callback(state)
+                end
+            end
         end
 
         bind_fn(function()
@@ -4900,9 +5308,18 @@ function ModuleManager:create_feature(settings)
     if manager.change_state then
         local flag = settings.flag
         if flag and self._library:flag_type(flag, 'boolean') then
-            manager:change_state(self._library._config._flags[flag], true)
-        elseif settings.default ~= nil then
-            manager:change_state(settings.default, true)
+            manager:change_state(self._library._config._flags[flag], true, false)
+        elseif type(settings.default) == 'boolean' then
+            -- Only a boolean `default` is an initial checked state. The
+            -- original library used `default` for the keybind label
+            -- ("Unknown"), so a string must never turn the feature on.
+            manager:change_state(settings.default, true, false)
+        end
+        if flag then
+            local default = type(settings.default) == 'boolean' and settings.default or false
+            self._library:register(flag, function(value)
+                manager:change_state(value and true or false, true, false)
+            end, default)
         end
     end
 
@@ -5175,7 +5592,7 @@ function ModuleManager:create_colorpicker(settings)
 
     local hue, sat, val = 0.6, 0.7, 1
 
-    local function paint(color, save, fire)
+    local function paint(color, save, fire, defer)
         local h, s, v = color:ToHSV()
         hue, sat, val = h, s, v
         sv.BackgroundColor3 = Color3.fromHSV(hue, 1, 1)
@@ -5191,9 +5608,16 @@ function ModuleManager:create_colorpicker(settings)
 
         if settings.flag then
             self._library._config._flags[settings.flag] = hex(color)
-            if save then Config:save(game.GameId, self._library._config) end
+            if save then self._library:autosave() end
         end
-        if fire ~= false and settings.callback then settings.callback(color) end
+        if fire ~= false and settings.callback then
+            if defer then
+                local callback = settings.callback
+                self._library:defer(function() callback(color) end)
+            else
+                settings.callback(color)
+            end
+        end
     end
 
     function manager:set_color(color)
@@ -5320,7 +5744,26 @@ function ModuleManager:create_colorpicker(settings)
     elseif settings.color then
         initial = settings.color
     end
-    paint(initial, false, false)
+    -- Fire the callback so a restored colour is re-applied by the script;
+    -- `save = false` keeps construction from writing the file, and
+    -- `defer = true` queues the callback until the window is revealed.
+    paint(initial, false, true, true)
+
+    -- Let `library:load_config` push a saved profile back into the swatch.
+    -- A saved colour is a hex string; a live caller may hand us a Color3.
+    if settings.flag then
+        self._library:register(settings.flag, function(value)
+            local color
+            if typeof(value) == 'Color3' then
+                color = value
+            elseif type(value) == 'string' then
+                color = parse_hex(value)
+            end
+            -- Restoring must not re-save while a profile is being applied,
+            -- but the callback fires so a feature can re-apply the colour.
+            if color then paint(color, false, true) end
+        end, hex(initial))
+    end
 
     manager._frame = frame
     manager._panel = panel
@@ -5422,14 +5865,21 @@ end
 --  Teardown
 --=====================================================================
 function Library:destroy()
+    -- `self` is the library instance when called as `library:destroy()`. It is
+    -- nil/Library when called statically (e.g. `Library.unload()` or
+    -- `pcall(library.unload)`), which still tears the shared GUI down.
+    local instance = (type(self) == 'table' and self ~= Library) and self or nil
+
     Connections:disconnect_all()
 
     -- Tear down this instance's own window (not whichever ScreenGui happens
     -- to share the name, so multiple windows can coexist).
-    if self._ui then
-        pcall(function() self._ui:Destroy() end)
+    if instance and instance._ui then
+        pcall(function() instance._ui:Destroy() end)
     end
 
+    local stellar = CoreGui:FindFirstChild('Stellar')
+    if stellar then pcall(function() stellar:Destroy() end) end
     local loader = CoreGui:FindFirstChild('StellarLoader')
     if loader then loader:Destroy() end
     local notifications = CoreGui:FindFirstChild('StellarNotifications')
@@ -5437,15 +5887,23 @@ function Library:destroy()
     local tooltip = CoreGui:FindFirstChild('StellarTooltip')
     if tooltip then tooltip:Destroy() end
 
-    self._ui = nil
-    self._refs = {}
-    self._tabs = {}
-    self._search_items = {}
-    self._active_tab = nil
-    self._search_text = ''
-    self._open_dropdown = nil
-    self._status_token = (self._status_token or 0) + 1
-    self._ui_open = false
+    if instance then
+        instance._ui = nil
+        instance._refs = {}
+        instance._tabs = {}
+        instance._search_items = {}
+        instance._active_tab = nil
+        instance._search_text = ''
+        instance._open_dropdown = nil
+        instance._status_token = (instance._status_token or 0) + 1
+        instance._ui_open = false
+        instance._deferred = {}
+    end
 end
+
+-- The original Stellar API exposed `Library.unload`. Keep it as an alias so
+-- existing scripts that call `library:unload()` / `pcall(library.unload)`
+-- keep working against the redesign.
+Library.unload = Library.destroy
 
 return Library
