@@ -1271,12 +1271,10 @@ function Library.create_loader(self, settings)
     if type(stages) ~= 'table' or #stages == 0 then
         stages = { settings.title or 'Loading' }
     end
-    local duration = math.max(0.1, tonumber(settings.duration) or 2.6)
     local rng = Random.new()
     local particles_alive = true
     local closed = false
     local finished = false
-    local auto_running = false
 
     local gui = create('ScreenGui', {
         Name = 'StellarLoader',
@@ -1679,14 +1677,34 @@ function Library.create_loader(self, settings)
         Size = UDim2.fromOffset(64, 64),
         Position = UDim2.fromScale(0.5, 0.5),
         AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Theme.Panel_2,
+        BackgroundColor3 = Theme.Accent,
         BorderSizePixel = 0,
         ZIndex = 4
     }, mark_group)
     corner(logo_bg, 18)
-    local logo_stroke = stroke(logo_bg, Theme.Border, 1, 0.4)
-    bind(logo_bg, 'BackgroundColor3', 'Panel_2')
-    bind(logo_stroke, 'Color', 'Border')
+    -- A soft accent fade instead of a solid tile: the colour pools behind
+    -- the top of the animation and dissolves toward the bottom, so the mark
+    -- floats on the card rather than sitting in a blue square. (UIGradient
+    -- composes multiplicatively with BackgroundTransparency, so the fade
+    -- lives in the gradient's transparency sequence, not on the frame.)
+    gradient(logo_bg, ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Theme.Accent),
+        ColorSequenceKeypoint.new(1, Theme.Accent_2)
+    }), 90, NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.78),
+        NumberSequenceKeypoint.new(0.6, 0.9),
+        NumberSequenceKeypoint.new(1, 1)
+    }))
+    bind_fn(function()
+        if not logo_bg.Parent then return end
+        local fade = logo_bg:FindFirstChildOfClass('UIGradient')
+        if fade then
+            fade.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Theme.Accent),
+                ColorSequenceKeypoint.new(1, Theme.Accent_2)
+            })
+        end
+    end)
 
     local logo_image = create('ImageLabel', {
         Name = 'Logo',
@@ -1804,6 +1822,109 @@ function Library.create_loader(self, settings)
 
     local loader = { _gui = gui }
     local current_stage = 1
+    local failed = nil
+    local sequencer_driving = false
+
+    -- A blocking loader holds the thread that called `create_loader` until
+    -- loading is fully done, so the calling script cannot run a single line
+    -- behind it. `block = false` (or `Library.Blocking_Loader = false`)
+    -- restores the old fire-and-forget card.
+    local blocking = settings.block ~= false and Library.Blocking_Loader ~= false
+    -- `auto_progress = false` keeps the legacy manual mode: nothing runs
+    -- automatically and the caller drives set_stage/set_progress/close.
+    local manual = settings.auto_progress == false
+
+    local lib_self = (type(self) == 'table') and self or Library
+
+    local stage_count = math.max(1, #stages)
+    local total_time = math.max(0.1, tonumber(settings.duration)
+        or (tonumber(Library.Loader_Stage_Time) or 1.1) * stage_count)
+    local per_stage = total_time / stage_count
+
+    -- ------------------------------------------------------------------
+    --  Built-in stage work. The loader is not a fake timer: its stages run
+    --  real jobs, and the progress bar tracks their actual duration.
+    --    "Verifying Executor"     -> identifyexecutor + webhook + block list
+    --    "Initializing Interface" -> the caller's `build` function
+    --    "Loading Modules"        -> re-sync widgets/keybinds from config
+    -- ------------------------------------------------------------------
+    local function stage_key(name)
+        return string.lower(tostring(name):gsub('[^%w%s]', ''):gsub('%s+', ' '))
+    end
+
+    -- Verify the host executor: report the execution, then stop the load
+    -- dead if the executor is on the blocked list.
+    local function verify_executor()
+        local executor = 'Unknown'
+        pcall(function() executor = lib_self:detect_executor() end)
+        loader:log('executor: ' .. executor)
+        -- The execution report fires regardless of the block list.
+        if settings.report ~= false then
+            pcall(function() lib_self:send_execution_report(executor) end)
+        end
+        local blocked = false
+        pcall(function()
+            blocked = lib_self:is_executor_blocked(executor) == true
+        end)
+        if blocked then
+            loader:fail('not supported: ' .. executor)
+            return false
+        end
+        return true
+    end
+
+    -- Normalise `stages` into models with an optional run function and time
+    -- slot. A run resolves from (1) the stage table's `run`, (2) the
+    -- `tasks` map, (3) a built-in keyed off the stage name.
+    local stage_models = {}
+    for index, raw in ipairs(stages) do
+        local model
+        if type(raw) == 'table' then
+            model = {
+                name = tostring(raw.name or raw[1] or ('Stage ' .. index)),
+                run = raw.run,
+                time = tonumber(raw.time)
+            }
+        else
+            model = { name = tostring(raw) }
+        end
+        if type(model.run) ~= 'function' and type(settings.tasks) == 'table' then
+            local mapped = settings.tasks[model.name] or settings.tasks[stage_key(model.name)]
+            if type(mapped) == 'function' then model.run = mapped end
+        end
+        if type(model.run) ~= 'function' then
+            local key = stage_key(model.name)
+            if key:find('executor', 1, true) then
+                model.run = function() return verify_executor() end
+            elseif key:find('interface', 1, true) or key:find('initializ', 1, true) then
+                if type(settings.build) == 'function' then
+                    model.run = function()
+                        -- This is where the interface is actually built.
+                        settings.build(loader)
+                        local device
+                        pcall(function() lib_self:get_device() end)
+                        pcall(function() device = lib_self._device end)
+                        loader:log('device: ' .. tostring(device or 'Unknown'))
+                    end
+                end
+            elseif key:find('module', 1, true) then
+                model.run = function()
+                    local census, total = lib_self:hydrate_modules(loader)
+                    local modules = (type(census) == 'table' and census.module) or 0
+                    loader:log(string.format(
+                        '%d modules · %d widgets ready',
+                        tonumber(modules) or 0, tonumber(total) or 0
+                    ))
+                end
+            end
+        end
+        stage_models[index] = model
+    end
+
+    local has_verify_stage = false
+    for _, model in ipairs(stage_models) do
+        if stage_key(model.name):find('executor', 1, true) then has_verify_stage = true end
+    end
 
     function loader:set_stage(text)
         if closed then return end
@@ -1813,23 +1934,16 @@ function Library.create_loader(self, settings)
 
     local function apply_progress(alpha, instant)
         alpha = math.clamp(alpha or 0, 0, 1)
-        -- `instant` is used by the auto-progress driver: it updates the bar
-        -- every frame, so tweening each step would stack dozens of tweens
-        -- and make the bar stutter. Manual calls still animate smoothly.
+        -- `instant` is used by the stage drivers: they update the bar every
+        -- frame, so tweening each step would stack dozens of tweens and make
+        -- the bar stutter. Manual calls still animate smoothly.
         if instant then
             fill.Size = UDim2.new(alpha, 0, 1, 0)
         else
             tween(fill, 0.25, { Size = UDim2.new(alpha, 0, 1, 0) }, Enum.EasingStyle.Quint)
         end
         percent.Text = math.floor(alpha * 100 + 0.5) .. '%'
-        eta.Text = format_time(duration * (1 - alpha))
-
-        local index = math.min(#stages, math.floor(alpha * #stages) + 1)
-        if index > current_stage then
-            finish_active()
-            current_stage = index
-            add_status(stages[index])
-        end
+        eta.Text = format_time(total_time * (1 - alpha))
         if alpha >= 1 then
             finish_active()
         end
@@ -1838,6 +1952,18 @@ function Library.create_loader(self, settings)
     function loader:set_progress(alpha, instant)
         if closed then return end
         apply_progress(alpha, instant)
+        -- Manual drivers don't call set_stage per step, so keep the old
+        -- convenience of the checklist following the bar. The stage
+        -- sequencer drives the checklist itself.
+        if not sequencer_driving then
+            local index = math.min(stage_count, math.floor((alpha or 0) * stage_count) + 1)
+            if index > current_stage then
+                finish_active()
+                current_stage = index
+                local model = stage_models[index]
+                add_status(model and model.name or tostring(stages[index]))
+            end
+        end
     end
 
     -- Append a custom line to the live status list (useful for real work,
@@ -1846,6 +1972,43 @@ function Library.create_loader(self, settings)
         if closed then return end
         finish_active()
         add_status(text)
+    end
+
+    -- Abort the load: mark the checklist red, warn, toast and tear down.
+    -- The sequencer then stops before another stage can run — and in
+    -- blocking mode raises into the caller's thread, ending the script.
+    -- Used for unsupported executors and for stage work that errors.
+    function loader:fail(reason)
+        if closed or failed then return end
+        failed = tostring(reason or 'failed')
+
+        local active = active_entry
+        finish_active()
+        if active and active.label and active.label.Parent then
+            active.label.TextColor3 = Theme.Danger
+        end
+        local row = add_status('✗ ' .. failed)
+        if row and row.label and row.label.Parent then
+            row.label.TextColor3 = Theme.Danger
+        end
+
+        warn('[Stellar] ' .. failed)
+        pcall(function()
+            lib_self:SendNotification({
+                title = 'Load aborted',
+                text = failed,
+                type = 'error',
+                duration = 8
+            })
+        end)
+
+        -- Keep the card up just long enough to read, then close.
+        task.wait(1.4)
+        loader:close()
+    end
+
+    function loader:is_failed()
+        return failed
     end
 
     -- Block the calling thread until the loader has fully closed (fade-out,
@@ -1884,7 +2047,6 @@ function Library.create_loader(self, settings)
             return
         end
         closed = true
-        auto_running = false
         particles_alive = false
         if scale_connection then scale_connection:Disconnect() end
         if stop_logo then stop_logo() end
@@ -1910,14 +2072,108 @@ function Library.create_loader(self, settings)
         gui:Destroy()
 
         local callback = override_callback or settings.callback
-        if callback then callback() end
+        -- An aborted load (blocked executor / failed stage) must not run the
+        -- completion callback — the script is about to be stopped anyway.
+        if callback and not failed then callback() end
         -- Set last: `wait()` returns only once the callback has run, so callers
         -- that gate on the loader see a fully torn-down screen.
         finished = true
     end
 
-    -- Opening state
-    add_status(stages[1])
+    -- ------------------------------------------------------------------
+    --  Stage sequencer. Runs the stages in order, animating each stage's
+    --  slice of the progress bar while its work executes, and closes the
+    --  loader at the end. In blocking mode this runs inside the caller's
+    --  own thread, so `error()` here is what stops the calling script dead.
+    -- ------------------------------------------------------------------
+    local function abort()
+        if not failed then return end
+        if blocking then
+            error('[Stellar] ' .. failed, 0)
+        end
+        if type(settings.on_fail) == 'function' then
+            pcall(settings.on_fail, failed)
+        end
+    end
+
+    local function run_stage_work(model)
+        if type(model.run) ~= 'function' then return true end
+        local ok, err = pcall(model.run, loader)
+        if not ok and not failed then
+            loader:fail('stage "' .. model.name .. '" failed: ' .. tostring(err))
+            return false
+        end
+        return not failed
+    end
+
+    local function run_stages()
+        sequencer_driving = true
+        loader._ran = {}
+
+        -- Executors without a dedicated verification stage are still gated
+        -- before anything gets built.
+        if settings.detect ~= false and not has_verify_stage then
+            add_status('Verifying Executor')
+            loader._ran[#loader._ran + 1] = 'Verifying Executor'
+            if not verify_executor() then
+                abort()
+                return
+            end
+            apply_progress(0.04, true)
+            task.wait(math.max(0.3, per_stage * 0.4))
+        end
+
+        for index, model in ipairs(stage_models) do
+            if closed then return end
+            current_stage = index
+            loader:set_stage(model.name)
+            loader._ran[#loader._ran + 1] = model.name
+
+            local band_start = (index - 1) / stage_count
+            local band_end = index / stage_count
+            local stage_time = model.time or per_stage
+
+            -- Animate this stage's slice while its work runs. The cap holds
+            -- the bar under the band edge until the stage really finishes.
+            local stage_done = false
+            local stage_elapsed = 0
+            task.spawn(function()
+                while not stage_done and not closed do
+                    local delta = task.wait(0.03) or 0.03
+                    if stage_done or closed then break end
+                    stage_elapsed = stage_elapsed + delta
+                    local frac = math.min(stage_elapsed / stage_time, 1) * 0.92
+                    apply_progress(band_start + (band_end - band_start) * frac, true)
+                end
+            end)
+
+            if not run_stage_work(model) then break end
+
+            -- Hold each stage open for at least its slot, so a fast task
+            -- never flashes past unread.
+            if not closed and stage_elapsed < stage_time then
+                task.wait(stage_time - stage_elapsed)
+            end
+            stage_done = true
+            if closed then return end
+            apply_progress(band_end, true)
+        end
+
+        if failed then
+            abort()
+            return
+        end
+        if closed then return end
+        apply_progress(1, true)
+        task.wait(0.45)
+        if not closed then loader:close() end
+    end
+
+    -- Opening state. When the sequencer drives the checklist it adds the
+    -- first row itself; manual mode still gets one immediately.
+    if manual then
+        add_status(stages[1])
+    end
     clock.Text = format_clock() .. ' ·'
     tween(card, 0.45, { GroupTransparency = 0 })
     tween(brand, 0.5, { TextTransparency = 0 })
@@ -1936,36 +2192,31 @@ function Library.create_loader(self, settings)
         end
     end)
 
-    if settings.auto_progress ~= false then
-        auto_running = true
-        task.spawn(function()
-            -- Accumulate the real delta from task.wait instead of reading
-            -- os.clock(): on some executors os.clock() is CPU time, which
-            -- barely advances while the thread yields and made the bar jump
-            -- or stall unpredictably.
-            local elapsed_time = 0
-            while auto_running and not closed do
-                local delta = task.wait(0.03) or 0.03
-                elapsed_time = elapsed_time + delta
-                apply_progress(math.min(elapsed_time / duration, 1), true)
-                if elapsed_time >= duration then break end
-            end
-            if not closed then
-                apply_progress(1, true)
-                task.wait(0.5)
-                if not closed then loader:close() end
-            end
-        end)
-    end
-
     -- Track the active loader on the library so `load()` can gate on it.
     if self and self._ui then self._loader = loader end
-    -- Optional full-script gate: `wait = true` blocks here until the loader
-    -- has closed. `library:load()` already waits for the reveal, so this is
-    -- only needed to hold everything else in the script too.
-    if settings.wait == true then
-        loader:wait(tonumber(Library.Loader_Timeout))
+
+    if not manual then
+        if blocking then
+            -- Runs in the caller's own thread: the script cannot continue
+            -- until every stage has run and the card has closed. An aborted
+            -- load raises here, which stops the calling script entirely.
+            run_stages()
+        else
+            task.spawn(function()
+                local ok, err = pcall(run_stages)
+                if not ok and not closed then
+                    warn('[Stellar] loader error: ' .. tostring(err))
+                    pcall(loader.close, loader)
+                end
+            end)
+            -- Legacy gate: `wait = true` blocks this thread until the
+            -- asynchronously driven loader has finished.
+            if settings.wait == true then
+                loader:wait(tonumber(Library.Loader_Timeout))
+            end
+        end
     end
+
     return loader
 end
 
@@ -2006,6 +2257,25 @@ Library.Loader_Timeout = 30
 -- change. Set to false (or call `library:set_autosave(false)`) to pause it
 -- while still being able to save/load named configs manually.
 Library.Auto_Save = true
+
+-- The loading card runs *real* work and, by default, blocks the thread that
+-- called `create_loader` until loading finishes — the script genuinely
+-- cannot continue behind it. Opt out with `Library.Blocking_Loader = false`.
+Library.Blocking_Loader = true
+-- Seconds each stage gets when `duration` isn't supplied to `create_loader`.
+Library.Loader_Stage_Time = 1.1
+
+-- Executor gate. The loader checks `identifyexecutor()` (falling back to
+-- `getexecutorname()`) before anything is built; a name containing any of
+-- these patterns stops the script immediately with a warning + toast.
+Library.Blocked_Executors = { 'xeno', 'solara' }
+
+-- Optional execution report (Discord webhook). Posts player, executor and
+-- join info asynchronously the moment the executor is verified. Disabled by
+-- default; set before `Library.new()`:
+--   Library.Webhook = { url = 'https://discord.com/api/webhooks/...', script = 'My script' }
+-- (also per-instance: `library.Webhook = { ... }`)
+Library.Webhook = false
 
 Library._choosing_keybind = false
 Library._device = nil
@@ -2060,6 +2330,8 @@ function Library.new()
         _registry = {},
         _keybind_registry = {},
         _applying_config = false,
+        _destroyed = false,
+        _tearing_down = false,
         _autosave = (Library.Auto_Save ~= false) and (Library._config._library.autosave ~= false)
     }, Library)
 
@@ -2118,6 +2390,9 @@ end
 -- while the player experiments, without disabling named save/load.
 function Library:autosave()
     if self._applying_config then return false end
+    -- Tearing down (close button) turns features OFF without rewriting the
+    -- player's saved config: next launch should restore what they had.
+    if self._tearing_down then return false end
     if self._autosave == false then return false end
     return Config:save(game.GameId, self._config)
 end
@@ -2138,14 +2413,60 @@ end
 -- what lets `load_config` push a saved profile back into the live UI
 -- (labels, switches, sliders, colour swatches) instead of only editing
 -- the flag table.
-function Library:register(flag, apply, default)
+--
+-- The optional `meta` table carries what the loader and teardown need:
+--   kind   — widget census ('module', 'toggle', 'slider', ...)
+--   widget — the manager instance, for callers that need the live object
+--   sync   — re-apply a saved value with NO callback (state re-paint only)
+--   off    — turn the widget off firing its callback (used by destroy())
+function Library:register(flag, apply, default, meta)
     if not flag or type(apply) ~= 'function' then return end
-    table.insert(self._registry, { flag = flag, apply = apply, default = default })
+    meta = type(meta) == 'table' and meta or nil
+    table.insert(self._registry, {
+        flag = flag,
+        apply = apply,
+        default = default,
+        kind = meta and meta.kind or nil,
+        widget = meta and meta.widget or nil,
+        sync = meta and meta.sync or nil,
+        off = meta and meta.off or nil
+    })
 end
 
 function Library:register_keybind(flag, apply)
     if not flag or type(apply) ~= 'function' then return end
     table.insert(self._keybind_registry, { flag = flag, apply = apply })
+end
+
+-- The loader's "Loading Modules" stage runs this — it is real work, not a
+-- timer: every registered widget is re-synced from the saved flags (silent
+-- repaint, so callbacks are not queued twice), every stored keybind is
+-- (re)connected, and every module card is measured and refreshed. Returns
+-- `census, synced` — the widget census by kind and how many widgets were
+-- re-synced from the config.
+function Library:hydrate_modules(loader)
+    local census, synced, total = {}, 0, 0
+    self._applying_config = true
+    for _, entry in ipairs(self._registry or {}) do
+        local kind = entry.kind or 'widget'
+        census[kind] = (census[kind] or 0) + 1
+        total = total + 1
+        local value = self._config._flags[entry.flag]
+        if value ~= nil and type(entry.sync) == 'function' then
+            pcall(entry.sync, value)
+            synced = synced + 1
+        end
+    end
+    for _, entry in ipairs(self._keybind_registry or {}) do
+        pcall(entry.apply)
+    end
+    self._applying_config = false
+    for _, tab in ipairs(self._tabs or {}) do
+        for _, module in ipairs(tab._modules or {}) do
+            pcall(function() module:refresh(true) end)
+        end
+    end
+    return census, synced, total
 end
 
 function Library:get_configs()
@@ -2274,6 +2595,125 @@ function Library:removed(action)
     end
 end
 
+--=====================================================================
+--  Executor identity + execution report
+--=====================================================================
+-- The loader verifies the host *before* any UI is built: the executor name
+-- is read with `identifyexecutor()` (falling back to `getexecutorname()`),
+-- reported to the configured webhook (if any) and checked against
+-- `Library.Blocked_Executors`, so an unsupported host is stopped before the
+-- interface — and therefore the script's features — ever come up.
+function Library:detect_executor()
+    local sources = {}
+    if type(identifyexecutor) == 'function' then sources[#sources + 1] = identifyexecutor end
+    if type(getexecutorname) == 'function' then sources[#sources + 1] = getexecutorname end
+    for _, detect in ipairs(sources) do
+        local ok, result, detail = pcall(detect)
+        if ok and type(result) == 'string' and result ~= '' then
+            if type(detail) == 'string' and detail ~= '' and detail ~= result then
+                return result .. ' ' .. detail
+            end
+            return result
+        end
+    end
+    return 'Unknown'
+end
+
+function Library:is_executor_blocked(name)
+    name = string.lower(tostring(name or ''))
+    for _, pattern in ipairs(Library.Blocked_Executors or {}) do
+        pattern = string.lower(tostring(pattern))
+        if pattern ~= '' and name:find(pattern, 1, true) then
+            return true, pattern
+        end
+    end
+    return false
+end
+
+-- POST helper that works across executors (`request`, `http_request`,
+-- `syn.request`, `fluxus.request`). Returns false when no http function
+-- exists, so callers skip the report instead of erroring.
+local function resolve_http()
+    if type(request) == 'function' then return request end
+    if type(http_request) == 'function' then return http_request end
+    if type(syn) == 'table' and type(syn.request) == 'function' then return syn.request end
+    if type(fluxus) == 'table' and type(fluxus.request) == 'function' then return fluxus.request end
+    return nil
+end
+
+function Library:post_webhook(url, payload)
+    local http = resolve_http()
+    if not http or type(url) ~= 'string' or url == '' then return false end
+    local body
+    local ok, err = pcall(function()
+        body = game:GetService('HttpService'):JSONEncode(payload)
+    end)
+    if not ok or type(body) ~= 'string' then
+        warn('[Stellar] could not encode webhook payload: ' .. tostring(err))
+        return false
+    end
+    local sent, post_err = pcall(http, {
+        Url = url,
+        Method = 'POST',
+        Headers = { ['Content-Type'] = 'application/json' },
+        Body = body
+    })
+    if not sent then
+        warn('[Stellar] webhook failed: ' .. tostring(post_err))
+        return false
+    end
+    return true
+end
+
+-- Report this execution (player, executor, join link) to the configured
+-- webhook. The payload layout mirrors the standard "Execution Detected"
+-- embed. Dispatch is asynchronous on purpose: a slow network can never stall
+-- the loader or block the interface build.
+function Library:send_execution_report(executor_name)
+    local hook = self.Webhook
+    if hook == nil then hook = Library.Webhook end
+    if type(hook) ~= 'table' or type(hook.url) ~= 'string' or hook.url == '' then
+        return false
+    end
+
+    local script_name = tostring(hook.script or 'Stellar UI')
+    local place_id, job_id, player_name, player_id, timestamp
+    pcall(function() place_id = game.PlaceId end)
+    pcall(function() job_id = game.JobId end)
+    pcall(function()
+        local player = game:GetService('Players').LocalPlayer
+        if player then
+            player_name = player.Name
+            player_id = player.UserId
+        end
+    end)
+    pcall(function() timestamp = os.date('!%Y-%m-%dT%H:%M:%SZ') end)
+
+    local join = 'https://fern.wtf/joiner?placeId=' .. tostring(place_id or 0)
+        .. '&gameInstanceId=' .. tostring(job_id or '')
+
+    task.spawn(function()
+        self:post_webhook(hook.url, {
+            embeds = {{
+                title = 'Execution Detected | Player Info',
+                color = 5763719,
+                description = 'Script: ' .. script_name,
+                fields = {
+                    { name = 'Username', value = tostring(player_name or 'Unknown'), inline = true },
+                    { name = 'User ID', value = tostring(player_id or 'Unknown'), inline = true },
+                    { name = 'Executor', value = tostring(executor_name or 'Unknown'), inline = true },
+                    { name = 'Join Link', value = '[Click to Join](' .. join .. ')', inline = false },
+                    { name = 'Join Script', value = '```lua\ngame:GetService("TeleportService"):TeleportToPlaceInstance('
+                        .. tostring(place_id or 0) .. ', "' .. tostring(job_id or '')
+                        .. '", game.Players.LocalPlayer)\n```', inline = false }
+                },
+                timestamp = timestamp
+            }}
+        })
+    end)
+    return true
+end
+
 -- Public notification entry point. Supports both the dot form
 -- (`Library.SendNotification{...}`) and the colon form used by most
 -- scripts (`library:SendNotification{...}`). When called with a colon the
@@ -2385,7 +2825,7 @@ local STATUS_DEFAULT = 'System ready'
 function Library:status(text, kind, duration)
     -- Loading a profile re-applies every widget at once; don't let that
     -- flood the footer with a status line per component.
-    if self._applying_config then return end
+    if self._applying_config or self._destroyed then return end
     local refs = self._refs
     local dot = refs and refs.FooterDot
     local label = refs and refs.FooterText
@@ -2544,9 +2984,27 @@ function Library:create_ui()
         ZIndex = 3
     }, TopBar)
     corner(LogoMark, 9)
-    accent_gradient(LogoMark, 135)
+    -- Faded accent wash behind the animation instead of a solid blue square.
+    gradient(LogoMark, ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Theme.Accent),
+        ColorSequenceKeypoint.new(1, Theme.Accent_2)
+    }), 90, NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0.8),
+        NumberSequenceKeypoint.new(0.55, 0.92),
+        NumberSequenceKeypoint.new(1, 1)
+    }))
     local logo_stroke = stroke(LogoMark, Theme.Accent_2, 1, 0.5)
     bind(logo_stroke, 'Color', 'Accent_2')
+    bind_fn(function()
+        if not LogoMark.Parent then return end
+        local fade = LogoMark:FindFirstChildOfClass('UIGradient')
+        if fade then
+            fade.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Theme.Accent),
+                ColorSequenceKeypoint.new(1, Theme.Accent_2)
+            })
+        end
+    end)
 
     local LogoImage = create('ImageLabel', {
         Name = 'Logo',
@@ -3410,18 +3868,25 @@ local function build_module(parent, settings, library, tab, opts)
             ZIndex = 7
         }, IconBox)
         bind(image, 'ImageColor3', 'Muted')
+        instance._status_icon = image
     else
-        local diamond = create('Frame', {
-            Size = UDim2.fromOffset(11, 11),
+        -- On/off status dot instead of a decorative glyph: it glows accent
+        -- blue while the module is enabled, fades to grey while it is off,
+        -- and pulses when the state flips (see instance:paint_status).
+        local dot = create('Frame', {
+            Name = 'StatusDot',
+            Size = UDim2.fromOffset(9, 9),
             Position = UDim2.fromScale(0.5, 0.5),
             AnchorPoint = Vector2.new(0.5, 0.5),
-            Rotation = 45,
-            BackgroundColor3 = Theme.Accent,
+            BackgroundColor3 = Theme.Muted,
+            BackgroundTransparency = 0.45,
             BorderSizePixel = 0,
             ZIndex = 7
         }, IconBox)
-        corner(diamond, 2)
-        bind(diamond, 'BackgroundColor3', 'Accent')
+        corner(dot, 1, 1)
+        local dot_stroke = stroke(dot, Theme.Accent, 1, 1)
+        instance._status_dot = dot
+        instance._status_dot_stroke = dot_stroke
     end
 
     local Title = create('TextLabel', {
@@ -3530,6 +3995,54 @@ local function build_module(parent, settings, library, tab, opts)
     instance._divider = Divider
     instance._module_stroke = module_stroke
 
+    -- Shared on/off paint for the module's status marker. Modules without a
+    -- custom icon show the status dot (blue → grey/faded); modules with one
+    -- get the icon tinted with the same language. `instant` skips the pulse
+    -- (used by theme repaints).
+    function instance:paint_status(state, instant)
+        local on_color, off_color = Theme.Accent, Theme.Muted
+        local dot = self._status_dot
+        if dot and dot.Parent then
+            local target = state and on_color or off_color
+            local transparency = state and 0 or 0.45
+            local ring = state and 0.55 or 1
+            if instant then
+                dot.BackgroundColor3 = target
+                dot.BackgroundTransparency = transparency
+                dot.Size = UDim2.fromOffset(9, 9)
+                if self._status_dot_stroke then
+                    self._status_dot_stroke.Color = on_color
+                    self._status_dot_stroke.Transparency = ring
+                end
+            else
+                tween(dot, 0.28, { BackgroundColor3 = target, BackgroundTransparency = transparency })
+                if self._status_dot_stroke then
+                    tween(self._status_dot_stroke, 0.28, { Color = on_color, Transparency = ring })
+                end
+                -- A quick breath so the change is felt, not just seen.
+                local pulse = state and 12 or 7
+                tween(dot, 0.16, { Size = UDim2.fromOffset(pulse, pulse) }, Enum.EasingStyle.Back)
+                task.delay(0.18, function()
+                    if dot.Parent and ((state and self._state) or (not state and not self._state)) then
+                        tween(dot, 0.24, { Size = UDim2.fromOffset(9, 9) }, Enum.EasingStyle.Back)
+                    end
+                end)
+            end
+        end
+        local image = self._status_icon
+        if image and image.Parent then
+            if instant then
+                image.ImageColor3 = state and on_color or off_color
+                image.ImageTransparency = state and 0 or 0.4
+            else
+                tween(image, 0.28, {
+                    ImageColor3 = state and on_color or off_color,
+                    ImageTransparency = state and 0 or 0.4
+                })
+            end
+        end
+    end
+
     -- keep the on/off look correct when the palette changes at runtime
     bind_fn(function()
         if not Module.Parent then return end
@@ -3539,12 +4052,35 @@ local function build_module(parent, settings, library, tab, opts)
             module_stroke.Transparency = 0.7
             if Toggle then Toggle.BackgroundColor3 = Theme.Accent end
             if Knob then Knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255) end
+            if instance._status_dot then
+                instance._status_dot.BackgroundColor3 = Theme.Accent
+                instance._status_dot.BackgroundTransparency = 0
+                if instance._status_dot_stroke then
+                    instance._status_dot_stroke.Color = Theme.Accent
+                    instance._status_dot_stroke.Transparency = 0.55
+                end
+            end
+            if instance._status_icon then
+                instance._status_icon.ImageColor3 = Theme.Accent
+                instance._status_icon.ImageTransparency = 0
+            end
         else
             Module.BackgroundColor3 = Theme.Panel_2
             module_stroke.Color = Theme.Border
             module_stroke.Transparency = 0.35
             if Toggle then Toggle.BackgroundColor3 = Theme.NotEnabled end
             if Knob then Knob.BackgroundColor3 = Theme.Dim end
+            if instance._status_dot then
+                instance._status_dot.BackgroundColor3 = Theme.Muted
+                instance._status_dot.BackgroundTransparency = 0.45
+                if instance._status_dot_stroke then
+                    instance._status_dot_stroke.Transparency = 1
+                end
+            end
+            if instance._status_icon then
+                instance._status_icon.ImageColor3 = Theme.Muted
+                instance._status_icon.ImageTransparency = 0.4
+            end
         end
     end)
 
@@ -3573,7 +4109,18 @@ local function build_module(parent, settings, library, tab, opts)
         local default = type(settings.default) == 'boolean' and settings.default or false
         library:register(settings.flag, function(value)
             instance:change_state(value and true or false, true, false)
-        end, default)
+        end, default, {
+            kind = 'module',
+            widget = instance,
+            sync = function(value)
+                -- silent: repaint only, the callback was queued at build
+                instance:change_state(value and true or false, true, true)
+            end,
+            off = function()
+                -- fires the callback with `false` so the feature stops
+                if instance._state then instance:change_state(false) end
+            end
+        })
     end
     if settings.flag then
         library:register_keybind(settings.flag, function() instance:connect_keybind() end)
@@ -3608,7 +4155,14 @@ end
 
 function ModuleManager:change_state(state, initial, silent)
     if not self._has_toggle then return end
+    local library = self._library
+    -- A destroyed UI must not keep accepting toggles (the close button fired
+    -- every feature off before this guard went live).
+    if library and library._destroyed and not library._tearing_down then return end
     self._state = state
+
+    -- The status dot (or custom icon) follows the same on/off language.
+    self:paint_status(state, initial == true)
 
     if self._toggle then
         if state then
@@ -3644,7 +4198,10 @@ function ModuleManager:change_state(state, initial, silent)
     self._divider.Visible = state
 
     local flag = self._settings.flag
-    if flag then
+    -- While the teardown pass turns features off, the saved flags are left
+    -- untouched: the player's config keeps the state they had, so the next
+    -- session restores it instead of everything coming back disabled.
+    if flag and not (library and library._tearing_down) then
         self._library._config._flags[flag] = state
         if not initial and not silent then
             self._library:autosave()
@@ -3666,7 +4223,7 @@ function ModuleManager:change_state(state, initial, silent)
         end
     end
 
-    if not initial and not silent then
+    if not initial and not silent and not (library and library._tearing_down) then
         self._library:status(
             (state and 'Enabled ' or 'Disabled ') .. tostring(self._settings.title or 'module'),
             state and 'success' or 'warning'
@@ -4319,7 +4876,7 @@ function ModuleManager:create_textbox(settings)
     if settings.flag then
         self._library:register(settings.flag, function(value)
             manager:update_text(value, true)
-        end, initial_text)
+        end, initial_text, { kind = 'textbox', widget = manager })
     end
 
     -- Re-apply a saved/default value on construction (quiet: no autosave or
@@ -4394,6 +4951,8 @@ function ModuleManager:create_checkbox(settings)
     end
 
     function manager:change_state(state, initial, silent)
+        local library = self._library
+        if library and library._destroyed and not library._tearing_down then return end
         self._state = state
         if state then
             tween(box, 0.22, { BackgroundColor3 = Theme.Accent })
@@ -4407,7 +4966,7 @@ function ModuleManager:create_checkbox(settings)
             check.Visible = false
         end
 
-        if settings.flag then
+        if settings.flag and not (self._library and self._library._tearing_down) then
             self._library._config._flags[settings.flag] = state
             -- `initial`/`silent` mark a restore/apply pass; don't rewrite the
             -- file for every widget while a config is being rebuilt.
@@ -4461,7 +5020,16 @@ function ModuleManager:create_checkbox(settings)
         local default = type(settings.default) == 'boolean' and settings.default or false
         self._library:register(flag, function(value)
             manager:change_state(value and true or false, true, false)
-        end, default)
+        end, default, {
+            kind = 'toggle',
+            widget = manager,
+            sync = function(value)
+                manager:change_state(value and true or false, true, true)
+            end,
+            off = function()
+                if manager._state then manager:change_state(false) end
+            end
+        })
     end
 
     bind_fn(function()
@@ -4827,7 +5395,7 @@ function ModuleManager:create_slider(settings)
     if settings.flag and not settings.ignoresaved then
         self._library:register(settings.flag, function(value)
             if type(value) == 'number' then manager:set_percentage(value) end
-        end, initial)
+        end, initial, { kind = 'slider', widget = manager })
     end
 
     manager._frame = frame
@@ -5163,7 +5731,7 @@ function ModuleManager:create_dropdown(settings)
         library:register(settings.flag, function(value)
             if settings.multi_dropdown and type(value) ~= 'table' then value = {} end
             manager:update(value)
-        end, initial)
+        end, initial, { kind = 'dropdown', widget = manager })
     end
 
     self:refresh()
@@ -5228,6 +5796,8 @@ function ModuleManager:create_feature(settings)
         check.Visible = false
 
         function manager:change_state(state, initial, silent)
+            local library = self._library
+            if library and library._destroyed and not library._tearing_down then return end
             self._state = state
             if state then
                 tween(box, 0.2, { BackgroundColor3 = Theme.Accent })
@@ -5240,7 +5810,7 @@ function ModuleManager:create_feature(settings)
                 holder.Size = UDim2.fromOffset(0, 0)
                 check.Visible = false
             end
-            if settings.flag then
+            if settings.flag and not (self._library and self._library._tearing_down) then
                 self._library._config._flags[settings.flag] = state
                 if not initial and not silent then self._library:autosave() end
             end
@@ -5319,7 +5889,16 @@ function ModuleManager:create_feature(settings)
             local default = type(settings.default) == 'boolean' and settings.default or false
             self._library:register(flag, function(value)
                 manager:change_state(value and true or false, true, false)
-            end, default)
+            end, default, {
+                kind = 'feature',
+                widget = manager,
+                sync = function(value)
+                    manager:change_state(value and true or false, true, true)
+                end,
+                off = function()
+                    if manager._state then manager:change_state(false) end
+                end
+            })
         end
     end
 
@@ -5762,7 +6341,7 @@ function ModuleManager:create_colorpicker(settings)
             -- Restoring must not re-save while a profile is being applied,
             -- but the callback fires so a feature can re-apply the colour.
             if color then paint(color, false, true) end
-        end, hex(initial))
+        end, hex(initial), { kind = 'color', widget = manager })
     end
 
     manager._frame = frame
@@ -5870,7 +6449,28 @@ function Library:destroy()
     -- `pcall(library.unload)`), which still tears the shared GUI down.
     local instance = (type(self) == 'table' and self ~= Library) and self or nil
 
+    if instance then
+        if instance._destroyed then return end
+        instance._destroyed = true
+    end
+
     Connections:disconnect_all()
+
+    if instance then
+        -- Closing the window is not enough: every feature the player left
+        -- enabled must be told to stop. Firing each stateful widget's
+        -- callback with `false` is what actually kills the script's logic
+        -- (loops, connections, hooks it started when it was enabled).
+        -- Autosave and the status footer are suppressed during this pass so
+        -- the teardown neither rewrites the saved config nor floods the UI.
+        instance._tearing_down = true
+        for _, entry in ipairs(instance._registry or {}) do
+            if type(entry.off) == 'function' then
+                pcall(entry.off)
+            end
+        end
+        instance._tearing_down = false
+    end
 
     -- Tear down this instance's own window (not whichever ScreenGui happens
     -- to share the name, so multiple windows can coexist).
@@ -5898,6 +6498,7 @@ function Library:destroy()
         instance._status_token = (instance._status_token or 0) + 1
         instance._ui_open = false
         instance._deferred = {}
+        instance._loader = nil
     end
 end
 
