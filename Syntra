@@ -1,0 +1,1099 @@
+local CONFIG = {
+    -- Executor / real-FFlag layer -----------------------------------------
+    ApplyRealFlags     = true,   -- call setfflag() for the whole preset
+    RestoreRealFlags   = true,   -- read + restore old values via getfflag()
+    UncapFPS           = true,   -- call setfpscap() when available
+    FpsCap             = 9999,   -- uncapped / very high
+    FpsCapOnDisable    = 60,     -- fallback used only if getfpscap() is missing
+
+    -- Script-level "FFlag-like" layer -------------------------------------
+    DisablePostFX      = true,   -- FFlagDisablePostFx
+    EnableBloom        = false,  -- original script forced a Bloom; off = faster
+    DisableShadows     = true,   -- FIntRenderShadowIntensity = 0
+    DisableAtmosphere  = true,
+    DisableClouds      = true,   -- FFlagCloudsReflectOnWater / NullCheckClouds
+    DisableSky         = false,  -- Sky is cheap; enable for a tiny extra win
+    CalmWater          = true,   -- FIntRenderGrassDetailStrands / FRM distance
+    CalmWind           = true,   -- FFlagGlobalWindActivated = False
+    StripParticles     = true,   -- particle emitters, fire, smoke, sparkles
+    StripBeamsTrails   = true,   -- beams, trails, explosions
+    FlattenLighting    = true,   -- environment diffuse/specular + soft shadows
+    ReduceDecals       = false,  -- aggressive: hide Decals/Textures/SurfaceApps
+    FlattenMaterials   = false,  -- aggressive: every BasePart -> SmoothPlastic
+
+    -- Overlay / UX --------------------------------------------------------
+    ShowFPS            = true,   -- FFlagDebugDisplayFPS = True
+    ToggleKey          = Enum.KeyCode.RightShift,
+    AutoApply          = true,   -- run enable() on load
+}
+
+-- =============================== SERVICES ================================
+local Lighting   = game:GetService("Lighting")
+local Workspace  = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local Players    = game:GetService("Players")
+local Stats      = game:GetService("Stats")
+local UIS        = game:GetService("UserInputService")
+
+local localPlayer = Players.LocalPlayer
+
+local PREFIX = "[Syntra] "
+local function log(...)
+    print(PREFIX, ...)
+end
+
+-- ========================= EXECUTOR DETECTION ============================
+-- Resolve a function from the executor environment without ever throwing.
+local function getExecutorEnv()
+    if typeof(getgenv) == "function" then
+        local ok, env = pcall(getgenv)
+        if ok and type(env) == "table" then return env end
+    end
+    return _G
+end
+
+local EXEC_ENV = getExecutorEnv()
+
+local function resolveFunction(name)
+    local direct = rawget(_G, name)
+    if type(direct) == "function" then return direct end
+
+    if type(EXEC_ENV) == "table" then
+        local f = rawget(EXEC_ENV, name)
+        if type(f) == "function" then return f end
+    end
+
+    -- Common executor libraries that namespace their helpers.
+    for _, key in ipairs({ "syn", "fluxus", "krnl", "ScriptWare", "sirhurt" }) do
+        local lib = rawget(_G, key) or (type(EXEC_ENV) == "table" and rawget(EXEC_ENV, key))
+        if type(lib) == "table" and type(rawget(lib, name)) == "function" then
+            return rawget(lib, name)
+        end
+    end
+    return nil
+end
+
+local setfflag  = resolveFunction("setfflag")
+local getfflag  = resolveFunction("getfflag")
+local setfpscap = resolveFunction("setfpscap")
+local getfpscap = resolveFunction("getfpscap")
+local gethui    = resolveFunction("gethui")
+
+-- ================================ STATE ==================================
+local State = {
+    enabled       = false,
+    restores      = {},   -- LIFO stack of undo closures
+    realFlagsSet  = {},   -- [flagName] = originalValue
+    originalFpsCap= nil,
+    overlay       = nil,
+    overlayConn   = nil,
+}
+
+local function pushRestore(fn)
+    if type(fn) == "function" then
+        State.restores[#State.restores + 1] = fn
+    end
+end
+
+-- ============================ REAL FFLAGS ================================
+-- The full "NEW SYNTRA FFLAGS" preset (476 entries).
+-- Each row is { name, value }; value is kept as the string the client expects.
+local FLAGS = {
+    { "FIntDebugForceMSAASamples", "0" },
+    { "DFIntCSGLevelOfDetailSwitchingDistanceL23", "0" },
+    { "DFIntCSGLevelOfDetailSwitchingDistanceL34", "0" },
+    { "DFIntCSGLevelOfDetailSwitchingDistanceL12", "0" },
+    { "DFIntCSGLevelOfDetailSwitchingDistance", "0" },
+    { "DFIntDebugFRMQualityLevelOverride", "0" },
+    { "DFFlagTextureQualityOverrideEnabled", "True" },
+    { "DFIntCSGLevelOfDetailSwitchingDistanceStatic", "0" },
+    { "DFIntTextureQualityOverride", "0" },
+    { "FFlagHandleAltEnterFullscreenManually", "False" },
+    { "FFlagDebugGraphicsPreferD3D11", "True" },
+    { "FFlagTM2SkipMipsForUnstreamable2", "True" },
+    { "FFlagDisablePostFx", "True" },
+    { "DFIntDebugLimitMinTextureResolutionWhenSkipMips", "8" },
+    { "FFlagDebugDisplayFPS", "True" },
+    { "FFlagTaskSchedulerLimitTargetFpsTo2402", "False" },
+    { "DFFlagDisableDPIScale", "False" },
+    { "DFFlagDoNotSkipMipsBasedOnSystemMemoryPS", "True" },
+    { "FIntDebugTextureManagerSkipMips", "8" },
+    { "DFIntTaskSchedulerTargetFps", "999" },
+    { "FLogNetwork", "7" },
+    { "FIntRenderShadowIntensity", "0" },
+    { "DFFlagDebugRenderForceTechnologyVoxel", "True" },
+    { "FIntTerrainArraySliceSize", "0" },
+    { "FFlagDebugGraphicsPreferD3D11FL10", "True" },
+    { "FIntFullscreenTitleBarTriggerDelayMillis", "3600000" },
+    { "DFIntCanHideGuiGroupId", "32380007" },
+    { "FIntFontSizePadding", "3" },
+    { "FFlagDebugForceFutureIsBrightPhase3", "True" },
+    { "FFlagDebugForceFutureIsBrightPhase2", "True" },
+    { "DFIntSignalRCoreError", "1" },
+    { "FFlagFacialAnimationSupport1", "False" },
+    { "FFlagAssetPreloadingIXP", "True" },
+    { "DFFlagEnablePreloadAvatarAssets", "True" },
+    { "DFIntAnimationLodFacsDistanceMin", "0" },
+    { "FFlagDebugLargeReplicatorWrite", "True" },
+    { "FFlagEnablePreferredTextSizeStyleFixesInAppShell3", "True" },
+    { "DFStringTelegrafHTTPTransportUrl", "null" },
+    { "DFIntPhysicsAnalyticsHighFrequencyIntervalSec", "20" },
+    { "DFIntMemoryUtilityCurveTotalMemoryReserve", "0" },
+    { "DFIntReplicationDataCacheNumParallelTasks", "20" },
+    { "DFIntReplicatorAnimationTrackLimitPerAnimator", "-1" },
+    { "FFlagEnableInGameMenuChrome", "False" },
+    { "DFStringLightstepToken", "null" },
+    { "FIntMaxSpeedDeltaMillis", "1" },
+    { "FFlagSimEnableDCD10", "True" },
+    { "FFlagEnableCommandAutocomplete", "False" },
+    { "DFStringTelemetryV2Url", "null" },
+    { "FFlagRenderFixFog", "true" },
+    { "FIntVertexSmoothingGroupTolerance", "0" },
+    { "FIntEnableVisBugChecksHundredthPercent27", "100" },
+    { "FFlagFixOutdatedTimeScaleParticles", "False" },
+    { "DFIntSignalRCoreHubConnectionDisconnectInfoHundredthsPercent", "10" },
+    { "DFIntPlayerNetworkUpdateQueueSize", "20" },
+    { "DFIntSignalRCoreHandshakeTimeoutMs", "1000" },
+    { "DFFlagClampIncomingReplicationLag", "True" },
+    { "DFFlagReplicatorCheckReadTableCollisions", "True" },
+    { "DFIntMaxFrameBufferSize", "4" },
+    { "DFFlagEnableSoundPreloading", "True" },
+    { "DFIntMemoryUtilityCurveNumSegments", "100" },
+    { "DFIntInterpolationNumParallelTasks", "5" },
+    { "DFIntMaxAverageFrameDelayExceedFactor", "1" },
+    { "DFFlagEnableMeshPreloading2", "True" },
+    { "FFlagRenderCBRefactor2", "True" },
+    { "DFIntPerformanceControlFrameTimeMaxUtility", "-1" },
+    { "DFStringLightstepHTTPTransportUrlPath", "null" },
+    { "DFIntSignalRCoreKeepAlivePingPeriodMs", "1000" },
+    { "FFlagBetaBadgeLearnMoreLinkFormview", "False" },
+    { "FFlagDebugDisableTelemetryV2Event", "True" },
+    { "DFIntServerBandwidthPlayerSampleRateFacsOverride", "2147483647" },
+    { "FIntRenderLocalLightFadeInMs", "0" },
+    { "DFIntWaitOnUpdateNetworkLoopEndedMS", "100" },
+    { "DFIntRakNetApplicationFeedbackScaleUpThresholdPercent", "0" },
+    { "FIntCAP1209DataSharingTOSVersion", "0" },
+    { "FFlagVideoServiceAddHardwareCodecMetrics", "True" },
+    { "DFIntPreloadAvatarAssets", "2147483647" },
+    { "DFFlagEnableTexturePreloading", "True" },
+    { "DFFlagDebugLargeReplicatorForceFullSend", "True" },
+    { "DFFlagAllowRegistrationOfAnimationClipInCoreScripts", "True" },
+    { "DFIntSignalRCoreServerTimeoutMs", "5000" },
+    { "DFIntNetworkInProcessLimitGameplayMsClient", "0" },
+    { "DFStringAltTelegrafHTTPTransportUrl", "null" },
+    { "DFIntMaxProcessPacketsStepsPerCyclic", "5000" },
+    { "DFIntRaknetBandwidthInfluxHundredthsPercentageV2", "10000" },
+    { "DFFlagAllowPropertyDefaultSkip", "True" },
+    { "DFFlagRakNetDetectNetUnreachable", "True" },
+    { "DFIntSignalRHubConnectionConnectTimeoutMs", "7000" },
+    { "FFlagGameBasicSettingsFramerateCap5", "False" },
+    { "FFlagNewLightAttenuation", "True" },
+    { "FFlagDebugGraphicsDisableDirect3D11", "False" },
+    { "DFIntSignalRCoreHubMaxBackoffMs", "500" },
+    { "FFlagWindowsLaunchTypeAnalytics", "False" },
+    { "DFFlagEnableDynamicHeadByDefault", "False" },
+    { "DFIntClusterSenderMaxJoinBandwidthBps", "2100000000" },
+    { "DFIntServerFramesBetweenJoins", "1" },
+    { "DFIntTimestepArbiterAccelerationModelFactorThou", "50000" },
+    { "DFFlagSampleAndRefreshRakPing", "True" },
+    { "FIntInterpolationAwareTargetTimeLerpHundredth", "100" },
+    { "FFlagNewOptimizeNoCollisionPrimitiveInMidphase660", "True" },
+    { "DFIntClientPacketExcessMicroseconds", "1000" },
+    { "DFFlagSimSmoothedRunningController2", "True" },
+    { "DFIntPerformanceControlTextureQualityBestUtility", "-1" },
+    { "DFIntPerformanceControlReportingPeriodInMs", "700" },
+    { "DFIntRuntimeConcurrency", "12" },
+    { "FFlagBetterTrackpadScrolling", "True" },
+    { "FIntRuntimeMaxNumOfMutexes", "1000000" },
+    { "DFIntTargetTimeDelayFacctorTenths", "25" },
+    { "FIntActivatedCountTimerMSMouse", "0" },
+    { "DFIntSignalRCore", "1" },
+    { "DFIntTouchSenderMaxBandwidthBpsScaling", "2" },
+    { "FIntHSRClusterSymmetryDistancePercent", "10000" },
+    { "DFIntMegaReplicatorNetworkQualityProcessorUnit", "10" },
+    { "DFIntSignalRCoreHubBaseRetryMs", "50" },
+    { "FStringTerrainMaterialTable2022", "" },
+    { "DFIntSignalRHeartbeatIntervalSeconds", "1" },
+    { "DFFlagAudioUseVolumetricPanning", "True" },
+    { "FFlagGlobalWindRendering", "False" },
+    { "FFlagEnableBetaFacialAnimation2", "False" },
+    { "DFFlagAddUserIdToSessionTracking", "False" },
+    { "FFlagCommitToGraphicsQualityFix", "True" },
+    { "DFIntAssetPreloading", "2147483647" },
+    { "FFlagPreloadTextureItemsOption4", "True" },
+    { "DFIntAnimationLodFacsVisibilityDenominator", "0" },
+    { "DFIntWaitOnRecvFromLoopEndedMS", "10" },
+    { "FIntUnifiedLightingBlendZone", "0" },
+    { "DFIntMaxProcessPacketsStepsAccumulated", "0" },
+    { "FFlagDebugLargeReplicatorEnabled", "True" },
+    { "DFFlagRakNetDecoupleRecvAndUpdateLoopShutdown", "True" },
+    { "FFlagNextGenReplicatorEnabledRead2", "True" },
+    { "FStringCoreScriptBacktraceErrorUploadToken", "null" },
+    { "DFIntClientLightingTechnologyChangedTelemetryHundredthsPercent", "0" },
+    { "FFlagEnablePreferredTextSizeGuiService", "True" },
+    { "FFlagKeepZeroInfluenceBones", "False" },
+    { "DFFlagAudioEnableVolumetricPanningForMeshes", "True" },
+    { "FIntCAP1544DataSharingUserRolloutPercentage", "0" },
+    { "FFlagEnablePartyVoiceOnlyForEligibleUsers", "False" },
+    { "FFlagLuauCodegen", "True" },
+    { "FStringTerrainMaterialTablePre2022", "" },
+    { "DFIntPhysicsDecompForceUpgradeVersion", "4" },
+    { "DFIntMemoryUtilityCurveBaseHundrethsPercent", "10000" },
+    { "FFlagFixIGMTabTransitions", "True" },
+    { "DFIntTeleportClientAssetPreloadingHundredthsPercentage2", "100000" },
+    { "FIntRuntimeMaxNumOfSemaphores", "1000000" },
+    { "FIntDebugFRMOptionalMSAALevelOverride", "0" },
+    { "FFlagEnablePartyVoiceOnlyForUnfilteredThreads", "False" },
+    { "FIntRobloxGuiBlurIntensity", "0" },
+    { "DFFlagAnimatorFixReplicationASANError", "True" },
+    { "FFlagDebugDisableTelemetryV2Stat", "True" },
+    { "DFIntInterpolationFrameRotVelocityThresholdMillionth", "1" },
+    { "DFIntTeleportClientAssetPreloadingHundredthsPercentage", "100000" },
+    { "FFlagEnablePreferredTextSizeScale", "True" },
+    { "DFIntSignalRCoreTimerMs", "50" },
+    { "DFIntRakNetApplicationFeedbackScaleUpFactorHundredthPercent", "0" },
+    { "FFlagRenderDynamicResolutionScale11", "True" },
+    { "DFIntRakNetLoopMs", "1" },
+    { "DFFlagOptimizeNoCollisionPrimitiveInMidphaseCrash", "True" },
+    { "FIntCameraMaxZoomDistance", "2147483647" },
+    { "DFFlagPhysicsMechanismCacheOptimizeAlloc", "True" },
+    { "DFFlagPerformanceControlEnableMemoryProbing3", "True" },
+    { "DFFlagTeleportClientAssetPreloadingEnabledIXP", "True" },
+    { "FFlagVoiceBetaBadge", "False" },
+    { "DFIntMaxActiveAnimationTracks", "0" },
+    { "FIntRenderGrassHeightScalar", "0" },
+    { "DFIntNumFramesAllowedToBeAboveError", "1" },
+    { "DFFlagTeleportClientAssetPreloadingDoingExperiment", "True" },
+    { "DFFlagTeleportPreloadingMetrics5", "True" },
+    { "FFlagFRMRefactor", "False" },
+    { "DFFlagDebugSkipMeshVoxelizer", "True" },
+    { "FFlagEnableAudioPannerFiltering", "True" },
+    { "DFIntInterpolationFrameVelocityThresholdMillionth", "1" },
+    { "DFIntSignalRCoreRpcQueueSize", "4096" },
+    { "DFIntSignalRCoreNetworkHandler", "1" },
+    { "FIntPreferredTextSizeSettingBetaFeatureRolloutPercent", "100" },
+    { "DFIntSignalRHubConnectionMaxRetryTimeMs", "1000" },
+    { "FFlagDebugLargeReplicatorRead", "True" },
+    { "FFlagDebugForceGenerateHSR", "True" },
+    { "DFIntContentProviderPreloadHangTelemetryHundredthsPercentage", "0" },
+    { "DFIntNetworkCluster", "1" },
+    { "DFIntHACDPointSampleDistApartTenths", "2147483647" },
+    { "FFlagDebugDisableTelemetryPoint", "True" },
+    { "FFlagEnableInGameMenuDurationLogger", "False" },
+    { "DFIntTrackCountryRegionAPIHundredthsPercent", "10000" },
+    { "DFFlagDebugLargeReplicatorDisableCompression", "True" },
+    { "FFlagLuaMenuPerfImprovements", "True" },
+    { "FFlagUserCameraControlLastInputTypeUpdate", "False" },
+    { "DFIntClusterCompressionLevel", "0" },
+    { "FFlagFastGPULightCulling3", "True" },
+    { "FFlagDebugNextGenReplicatorEnabledWriteCFrameColor", "true" },
+    { "DFFlagCanClientReplicateProp", "False" },
+    { "FFlagFasterPreciseTime4", "True" },
+    { "DFIntClientPacketMaxDelayMs", "1" },
+    { "FFlagMessageBusCallOptimization", "True" },
+    { "DFFlagAddPlaySessionIdTelemetry", "False" },
+    { "FFlagEnablePerformanceControlService", "True" },
+    { "DFIntPhysicsReceiveNumParallelTasks", "19" },
+    { "FFlagLuaAppLegacyInputSettingRefactor", "True" },
+    { "DFIntNetworkQualityResponderUnit", "10" },
+    { "FFlagSortKeyOptimization", "True" },
+    { "DFIntRakNetNakResendDelayMsMax", "1" },
+    { "DFFlagRakNetCalculateApplicationFeedback2", "True" },
+    { "FFlagGraphicsEnableD3D10Compute", "True" },
+    { "FFlagDebugCodegenOptSize", "True" },
+    { "FFlagOnlyDecrementCompletenessIfReplicating", "True" },
+    { "FFlagQuaternionPoseCorrection", "True" },
+    { "DFIntS2PhysicsSenderRate", "38760" },
+    { "DFIntSendRakNetStatsInterval", "2147483647" },
+    { "FFlagEnableAnimatorSkipCopyPreviousRigKeyOnJointModification", "True" },
+    { "FIntRenderLocalLightUpdatesMax", "1" },
+    { "FFlagNewCameraControls_SpeedAdjustEnum", "False" },
+    { "DFIntGraphicsOptimizationModeMaxFrameTimeTargetMs", "25" },
+    { "DFFlagBrowserTrackerIdTelemetryEnabled", "False" },
+    { "DFFlagRakNetUnblockSelectOnShutdownByWritingToSocket", "True" },
+    { "DFStringCrashUploadToBacktraceBaseUrl", "null" },
+    { "FFlagControlBetaBadgeWithGuac", "False" },
+    { "FIntSmoothMouseSpringFrequencyTenths", "100" },
+    { "DFIntClientPacketMaxFrameMicroseconds", "200" },
+    { "DFStringCrashUploadToBacktraceWindowsPlayerToken", "null" },
+    { "FIntRuntimeMaxNumOfThreads", "1000000" },
+    { "DFFlagCorrectServerReplicatorStatsIP", "True" },
+    { "FFlagNextGenReplicatorEnabledWrite", "true" },
+    { "DFFlagNextGenRepRollbackOverbudgetPackets", "True" },
+    { "DFIntSignalRHubConnectionBaseRetryTimeMs", "50" },
+    { "FIntTaskSchedulerAutoThreadLimit", "6" },
+    { "DFIntJoinDataItemEstimatedCompressionRatioHundreths", "0" },
+    { "FIntRuntimeMaxNumOfLatches", "1000000" },
+    { "DFIntRakNetClockDriftAdjustmentPerPingMillisecond", "100" },
+    { "FFlagFixTextureCompositorFramebufferManagement2", "True" },
+    { "DFIntPerformanceControlFrameTimeMax", "1" },
+    { "DFIntBufferCompressionThreshold", "100" },
+    { "FStringPartTexturePackTablePre2022", "" },
+    { "DFStringRobloxAnalyticsURL", "null" },
+    { "FFlagNextGenReplicatorEnabledWrite2", "True" },
+    { "DFFlagOptimizeClusterCacheAlloc", "True" },
+    { "DFFlagSimOptimizeGeometryChangedAssemblies2", "True" },
+    { "FFlagUserBetterInertialScrolling", "True" },
+    { "DFFlagTeleportClientAssetPreloadingDoingExperiment2", "True" },
+    { "DFFlagDebugPerfMode", "True" },
+    { "FIntSSAOMipLevels", "0" },
+    { "DFFlagNetworkUseZstdWrapper", "False" },
+    { "DFIntRakNetSelectTimeoutMs", "1" },
+    { "DFIntRakNetApplicationFeedbackMaxSpeedBPS", "0" },
+    { "FFlagEnableInGameMenuChromeABTest2", "False" },
+    { "DFIntClusterSenderMaxUpdateBandwidthBps", "2100000000" },
+    { "FIntActivatedCountTimerMSKeyboard", "0" },
+    { "DFIntVoiceChatVolumeThousandths", "5000" },
+    { "DFIntJoinDataCompressionLevel", "0" },
+    { "FIntGrassMovementReducedMotionFactor", "0" },
+    { "DFIntMegaReplicatorNumParallelTasks", "19" },
+    { "DFFlagRakNetDetectRecvThreadOverload", "True" },
+    { "DFIntTaskSchedulerJobInitThreads", "6" },
+    { "FIntRenderShadowmapBias", "0" },
+    { "FFlagDebugAvatarChatVisualization", "True" },
+    { "DFIntFrameRateMSToReduceTouchEvents", "30" },
+    { "DFIntTaskSchedulerJobInGameThreads", "6" },
+    { "FFlagUserShowGuiHideToggles", "True" },
+    { "FFlagEnableQuickGameLaunch", "True" },
+    { "DFIntTouchSenderMaxBandwidthBps", "-1000000" },
+    { "FIntFRMMinGrassDistance", "0" },
+    { "FFlagSimCSGV3IncrementalTriangulationStreamingCompression", "False" },
+    { "FFlagDebugCheckRenderThreading", "True" },
+    { "DFIntGameNetCompressionLodByteBudgetThresholdPct", "0" },
+    { "FFlagPushFrameTimeToHarmony", "True" },
+    { "DFStringLightstepHTTPTransportUrlHost", "null" },
+    { "FIntRenderGrassHeightScaler", "0" },
+    { "DFFlagJointIrregularityOptimization", "true" },
+    { "FIntOverrideISRReplicatorStepBandwidthBytes", "131072" },
+    { "DFIntMaxInterpolationRecursionsBeforeCheck", "1" },
+    { "FFlagFixOutdatedParticles2", "False" },
+    { "FIntSimWorldTaskQueueParallelTasks", "20" },
+    { "FFlagNextGenReplicatorEnabledRead", "true" },
+    { "FFlagUISUseLastFrameTimeInUpdateInputSignal", "True" },
+    { "FFlagDebugRenderCollectGpuCounters", "True" },
+    { "DFFlagLoadCharacterLayeredClothingProperty2", "False" },
+    { "FStringGamesUrlPath", "/games/" },
+    { "FIntUITextureMaxUpdateDepth", "1" },
+    { "FFlagRenderEnableHalfsPVR", "False" },
+    { "FFlagGlobalWindActivated", "False" },
+    { "FFlagEnablePreferredTextSizeStyleFixesInAvatarExp", "True" },
+    { "FFlagFixSensitivityTextPrecision", "False" },
+    { "DFIntInterpolationNumMechanismsBatchSize", "1" },
+    { "FFlagEnablePreferredTextSizeSettingInMenus2", "True" },
+    { "DebugLimitMinTextureResolutionWhenSkipMips", "2147483647" },
+    { "DoNotSkipMipsBasedOnSystemMemoryPS", "True" },
+    { "TM2SkipMipsForUnstreamable2", "True" },
+    { "RenderUseTextureManager224", "False" },
+    { "DebugTextureManagerSkipMips", "9" },
+    { "EnablePowerTraceModule", "True" },
+    { "IncludePowerSaverMode", "True" },
+    { "DebugFRMQualityLevelOverride", "1" },
+    { "DFFlagEnableRequestAsyncCompression", "false" },
+    { "DFFlagRakNetDisconnectNotification", "True" },
+    { "DFStringCrashUploadToBacktraceMacPlayerToken", "null" },
+    { "DFIntVisibilityCheckRayCastLimitPerFrame", "10" },
+    { "DFIntLightstepHTTPTransportHundredthsPercent2", "0" },
+    { "DFFlagEnableLightstepReporting2", "False" },
+    { "FFlagFixGraphicsQuality", "True" },
+    { "DFFlagAudioDeviceTelemetry", "False" },
+    { "FFlagSimAdaptiveMinorOptimizations", "True" },
+    { "FFlagPreloadAllFonts", "True" },
+    { "DFFlagAddPlaySessionIdToSimConstraintTelemetryEvent", "False" },
+    { "FFlagLoginPageOptimizedPngs", "True" },
+    { "FFlagFixParticleAttachmentCulling", "False" },
+    { "DFIntSignalRHubConnectionHeartbeatTimerRateMs", "1000" },
+    { "FStringGetPlayerImageDefaultTimeout", "1" },
+    { "FStringVoiceBetaBadgeLearnMoreLink", "null" },
+    { "FFlagDebugForceFSMCPULightCulling", "True" },
+    { "FFlagReportGpuLimitedToPerfControl", "False" },
+    { "FFlagEnableInGameMenuChromeABTest4", "False" },
+    { "FFlagShaderLightingRefactor", "False" },
+    { "DFIntSignalRCoreHubMaxElapsedMs", "5000" },
+    { "DFIntInterpolationDtLimitForLod", "10" },
+    { "FIntRenderMeshOptimizeVertexBuffer", "1" },
+    { "FIntRenderMaxShadowAtlasUsageBeforeDownscale", "0" },
+    { "FIntRenderLocalLightUpdatesMin", "1" },
+    { "FIntDirectionalAttenuationMaxPoints", "0" },
+    { "FFlagUserSoundsUseRelativeVelocity2", "True" },
+    { "FFlagSimEnableDCD16", "True" },
+    { "FFlagShoeSkipRenderMesh", "False" },
+    { "FFlagRenderNoLowFrmBloom", "False" },
+    { "FFlagRenderLegacyShadowsQualityRefactor", "True" },
+    { "FFlagImproveShiftLockTransition", "True" },
+    { "FFlagFixParticleEmissionBias2", "False" },
+    { "FFlagDebugSSAOForce", "False" },
+    { "FFlagDebugEnableDirectAudioOcclusion2", "True" },
+    { "FFlagDebugDisableTelemetryV2Counter", "True" },
+    { "FFlagDebugDisableTelemetryEventIngest", "True" },
+    { "FFlagDebugDisableTelemetryEphemeralStat", "True" },
+    { "FFlagDebugDisableTelemetryEphemeralCounter", "True" },
+    { "FFlagDebugDeterministicParticles", "False" },
+    { "FFlagContentProviderPreloadHangTelemetry", "False" },
+    { "DFIntAnimationLodFacsDistanceMax", "0" },
+    { "DFFlagAudioEnableVolumetricPanningForPolys", "True" },
+    { "DFFlagRakNetFixBwCollapse", "False" },
+    { "DFIntNumFramesToKeepAfterInterpolation", "1" },
+    { "DFIntInterpolationMinAssemblyCount", "1" },
+    { "DFIntInterpolationNumMechanismsPerTask", "5" },
+    { "FFlagTrackPlaceIdForCrashEnabled", "False" },
+    { "FFlagCoreGuiTypeSelfViewPresent", "False" },
+    { "FStringPartTexturePackTable2022", "" },
+    { "DFIntAnimatorThrottleMaxFramesToSkip", "1" },
+    { "FIntRuntimeMaxNumOfConditions", "1000000" },
+    { "FIntEnableCullableScene2HundredthPercent3", "1000" },
+    { "FIntRakNetResendBufferArrayLength", "256" },
+    { "FIntRenderGrassDetailStrands", "0" },
+    { "FIntInterpolationMaxDelayMSec", "75" },
+    { "FIntRuntimeMaxNumOfSchedulers", "1000000" },
+    { "FIntSimSolverResponsiveness", "2147483647" },
+    { "FIntFRMMaxGrassDistance", "0" },
+    { "FIntRuntimeMaxNumOfDPCs", "64" },
+    { "FIntSmoothClusterTaskQueueMaxParallelTasks", "20" },
+    { "DFIntGraphicsOptimizationModeFRMFrameRateTarget", "144" },
+    { "DFIntClientNetworkInfluxHundredthsPercentage", "0" },
+    { "FFlagEnableZstdDictionaryForClientSettings", "False" },
+    { "DFFlagTeleportClientAssetPreloadingEnabledIXP2", "True" },
+    { "DFIntMaxReceiveToDeserializeLatencyMilliseconds", "10" },
+    { "DFFlagSolverStateReplicatedOnly2", "True" },
+    { "DFFlagSimOptimizeSetSize", "True" },
+    { "DFIntNetworkClusterPacketCacheNumParallelTasks", "2" },
+    { "DFIntMaxProcessPacketsJobScaling", "10000" },
+    { "DFFlagReplicatorSeparateVarThresholds", "True" },
+    { "DFFlagAcceleratorUpdateOnPropsAndValueTimeChange", "True" },
+    { "DFFlagDebugPauseVoxelizer", "True" },
+    { "DFIntCullFactorPixelThresholdShadowMapHighQuality", "2147483647" },
+    { "DFIntLargePacketQueueSizeCutoffMB", "1000" },
+    { "DFIntServerBandwidthPlayerSampleRate", "2147483647" },
+    { "DFIntCullFactorPixelThresholdShadowMapLowQuality", "2147483647" },
+    { "FFlagCreationDBCompressRequest", "False" },
+    { "DFIntClusterEstimatedCompressionRatioHundredths", "0" },
+    { "DFIntNetworkQualityResponderMaxWaitTime", "1" },
+    { "FFlagDebugDisableOptimizedBytecode", "False" },
+    { "DFFlagReplicateCreateToPlayer", "True" },
+    { "DFFlagDebugLargeReplicatorDisableDelta", "True" },
+    { "FFlagAdServiceEnabled", "False" },
+    { "DFIntInitialAccelerationLatencyMultTenths", "1" },
+    { "DFFlagRakNetUseSlidingWindow4", "True" },
+    { "DFFlagMergeFakeInputEvents3", "True" },
+    { "FFlagEnableZstdForClientSettings", "False" },
+    { "DFFlagAnimatorEnableNewAdornments", "True" },
+    { "DFIntCodecMaxOutgoingFrames", "10000" },
+    { "DFIntCodecMaxIncomingPackets", "100" },
+    { "DFIntTimeBetweenSendConnectionAttemptsMS", "200" },
+    { "DFIntTimestepArbiterAngAccelerationThresholdThou", "2000" },
+    { "DFIntClientPacketHealthyAllocationPercent", "20" },
+    { "DFFlagTeleportClientAssetPreloadingEnabled9", "True" },
+    { "DFIntServerRakNetBandwidthPlayerSampleRate", "2147483647" },
+    { "DFIntSendGameServerDataMaxLen", "9999999" },
+    { "DFIntDebugPerformanceControlFrameTime", "2" },
+    { "DFIntMaxDataPacketPerSend", "2147483647" },
+    { "DFIntDataSenderRate", "38760" },
+    { "DFIntConnectingTimerInterval", "10" },
+    { "DFIntBufferCompressionLevel", "0" },
+    { "DFIntMaxAcceptableUpdateDelay", "1" },
+    { "DFIntNumAssetsMaxToPreload", "2147483647" },
+    { "DFIntRakNetNakResendDelayMs", "1" },
+    { "DFIntBatchThumbnailResultsSizeCap", "200" },
+    { "DFIntNetworkSchemaCompressionRatio", "100" },
+    { "DFIntSendItemLimit", "7" },
+    { "FFlagMouseGetPartOptimization", "True" },
+    { "FFlagTouchscreenSupport", "True" },
+    { "FFlagRenderDebugCheckThreading2", "True" },
+    { "DFFlagDebugOverrideDPIScale", "False" },
+    { "FFlagHighlightOutlinesOnMobile", "True" },
+    { "FFlagRenderSkipReadingShaderData", "False" },
+    { "DFFlagFrameTimeStdDev", "False" },
+    { "DFFlagRakNetEnablePoll", "True" },
+    { "DFFlagMouseMoveOncePerFrame", "False" },
+    { "DFFlagAnimatorAnywhere", "True" },
+    { "FFlagPreComputeAcceleratorArrayForSharingTimeCurve", "True" },
+    { "DFIntMaxMissedWorldStepsRemembered", "2147483467" },
+    { "FIntLuaGcParallelMinMultiTasks", "6" },
+    { "DFFlagFastEndUpdateLoop", "true" },
+    { "DFFlagDebugEnableInterpThrottle", "True" },
+    { "DFIntRemoteEventSingleInvocationSizeLimit", "2900" },
+    { "FFlagPreloadMinimalFonts", "True" },
+    { "FFlagUserPreventOldBubbleChatOverlap", "False" },
+    { "FFlagEnableBetaBadgeLearnMore", "false" },
+    { "FFlagGraphicsGLEnableHQShadersExclusion", "False" },
+    { "FFlagEnableMenuModernizationABTest", "False" },
+    { "FFlagEnableReportAbuseMenuLayerOnV3", "false" },
+    { "FFlagRenderCheckThreading", "True" },
+    { "FFlagRenderPerformanceTelemetry", "False" },
+    { "DFIntUserIdPlayerNameLifetimeSeconds", "86400" },
+    { "FFlagEnableBubbleChatConfigurationV2", "False" },
+    { "FFlagGraphicsSettingsOnlyShowValidModes", "True" },
+    { "FFlagEnableFavoriteButtonForUgc", "true" },
+    { "FFlagEnableAudioOutputDevice", "false" },
+    { "DFFlagESGamePerfMonitorEnabled", "False" },
+    { "FIntDefaultMeshCacheSizeMB", "256" },
+    { "FFlagEnableReportAbuseMenuRoact2", "false" },
+    { "FFlagEnableMenuModernizationABTest2", "False" },
+    { "FFlagCloudsReflectOnWater", "False" },
+    { "FFlagEnableBubbleChatFromChatService", "False" },
+    { "DFStringHttpPointsReporterUrl", "null" },
+    { "DFStringAltHttpPointsReporterUrl", "null" },
+    { "DFStringAnalyticsEventStreamUrlEndpoint", "null" },
+    { "FFlagEnableReportAbuseMenuRoactABTest2", "False" },
+    { "FIntMockClientLightingTechnologyIxpExperimentMode", "0" },
+    { "FFlagOptimizeServerTickRate", "True" },
+    { "FFlagOptimizeNetworkTransport", "True" },
+    { "FFlagOptimizeNetwork", "True" },
+    { "FFlagMSRefactor5", "False" },
+    { "FFlagGameBasicSettingsFramerateCap2", "True" },
+    { "DFIntRakNetResendRttMultiple", "1" },
+    { "DFIntPlayerNetworkUpdateRate", "60" },
+    { "DFIntNetworkLatencyTolerance", "1" },
+    { "DFIntConnectionMTUSize", "900" },
+    { "DFIntTextureCompositorActiveJobs", "0" },
+    { "FFlagEnableAccessibilitySettingsAPIV2", "True" },
+    { "FIntMockClientLightingTechnologyIxpExperimentQualityLevel", "7" },
+    { "DFIntOptimizePingThreshold", "50" },
+    { "FFlagEnableAccessibilitySettingsEffectsInExperienceChat", "True" },
+    { "FFlagNullCheckCloudsRendering", "True" },
+    { "DFIntTimestepArbiterThresholdCFLThou", "300" },
+    { "DFIntNetworkPrediction", "120" },
+    { "DFIntClientLightingEnvmapPlacementTelemetryHundredthsPercent", "100" },
+    { "FFlagEnableAccessibilitySettingsEffectsInCoreScripts2", "True" },
+    { "DFIntServerTickRate", "60" },
+    { "FFlagDebugGraphicsPreferVulkan", "True" },
+    { "FFlagEnableAccessibilitySettingsInExperienceMenu2", "True" },
+    { "FFlagDebugSkyGray", "False" },
+    { "FFlagOptimizeNetworkRouting", "True" },
+    { "FFlagChatTranslationSettingEnabled3", "False" },
+    { "DFIntRaknetBandwidthPingSendEveryXSeconds", "1" },
+    { "DFIntServerPhysicsUpdateRate", "60" },
+    { "FFlagEnableInGameMenuControls", "False" },
+    { "FFlagEnableNewInviteMenuIXP2", "False" },
+    { "FIntReportDeviceInfoRollout", "0" },
+    { "FIntRenderLocalLightFadeInMs_enabled", "99999" },
+    { "FFlagDontCreatePingJob", "True" },
+    { "FFlagTopBarUseNewBadge", "false" },
+    { "FFlagGraphicsGLEnableSuperHQShadersExclusion", "False" },
+    { "FIntStartupInfluxHundredthsPercentage", "0" },
+    { "FFlagEnableV3MenuABTest3", "False" },
+    { "FIntMeshContentProviderForceCacheSize", "268435456" },
+    { "FFlagEnableInGameMenuModernization", "False" },
+    { "FFlagEnableMenuControlsABTest", "False" },
+}
+
+local function normalizeValue(v)
+    if type(v) == "boolean" then return v and "True" or "False" end
+    if v == nil then return "" end
+    return tostring(v)
+end
+
+local function applyRealFlags()
+    if not CONFIG.ApplyRealFlags then return 0, 0 end
+    if not setfflag then
+        log("setfflag() not exposed - using script-level FFlag emulation only.")
+        return 0, #FLAGS
+    end
+
+    local applied, failed = 0, 0
+    for i = 1, #FLAGS do
+        local flag = FLAGS[i]
+        local name, value = flag[1], flag[2]
+
+        if CONFIG.RestoreRealFlags and getfflag then
+            local ok, old = pcall(getfflag, name)
+            if ok and old ~= nil then
+                State.realFlagsSet[name] = old
+            end
+        end
+
+        if pcall(setfflag, name, value) then
+            applied = applied + 1
+        else
+            failed = failed + 1
+        end
+    end
+    return applied, failed
+end
+
+local function restoreRealFlags()
+    if not (CONFIG.RestoreRealFlags and setfflag and getfflag) then return end
+    for name, old in pairs(State.realFlagsSet) do
+        pcall(setfflag, name, normalizeValue(old))
+    end
+    State.realFlagsSet = {}
+end
+
+local function applyFpsCap()
+    if not (CONFIG.UncapFPS and setfpscap) then return end
+    if getfpscap then
+        local ok, cap = pcall(getfpscap)
+        if ok then State.originalFpsCap = cap end
+    end
+    pcall(setfpscap, CONFIG.FpsCap)
+end
+
+local function restoreFpsCap()
+    if not setfpscap then return end
+    local target = State.originalFpsCap
+    if target == nil then target = CONFIG.FpsCapOnDisable end
+    pcall(setfpscap, target)
+end
+
+-- ====================== SCRIPT-LEVEL FFLAG-LIKE ==========================
+-- One pass over the world for parts/lights/effects (avoids repeated
+-- Workspace:GetDescendants() scans). Weak keys mean destroyed instances are
+-- collected automatically instead of leaking.
+local function applyWorld()
+    local savedParts    = setmetatable({}, { __mode = "k" })
+    local savedLights   = setmetatable({}, { __mode = "k" })
+    local savedFx       = setmetatable({}, { __mode = "k" }) -- particles/beams/trails
+    local savedDecals   = setmetatable({}, { __mode = "k" })
+    local savedSurfaces = setmetatable({}, { __mode = "k" })
+    local savedMats     = setmetatable({}, { __mode = "k" })
+
+    local function process(inst)
+        -- Shadows (FIntRenderShadowIntensity = 0)
+        if CONFIG.DisableShadows then
+            if inst:IsA("BasePart") then
+                if savedParts[inst] == nil then savedParts[inst] = inst.CastShadow end
+                pcall(function() inst.CastShadow = false end)
+            elseif inst:IsA("Light") then
+                if savedLights[inst] == nil then savedLights[inst] = inst.Shadows end
+                pcall(function() inst.Shadows = false end)
+            end
+        end
+
+        -- Material flattening (FIntRenderMeshOptimizeVertexBuffer style win)
+        if CONFIG.FlattenMaterials and inst:IsA("BasePart") then
+            if savedMats[inst] == nil then
+                savedMats[inst] = { material = inst.Material, reflectance = inst.Reflectance }
+            end
+            pcall(function()
+                inst.Material = Enum.Material.SmoothPlastic
+                inst.Reflectance = 0
+            end)
+        end
+
+        -- Textures / decals (DFIntTextureQualityOverride = 0)
+        if CONFIG.ReduceDecals then
+            if inst:IsA("Decal") or inst:IsA("Texture") then
+                if savedDecals[inst] == nil then savedDecals[inst] = inst.Transparency end
+                pcall(function() inst.Transparency = 1 end)
+            elseif inst:IsA("SurfaceAppearance") then
+                if savedSurfaces[inst] == nil then savedSurfaces[inst] = inst.Parent end
+                pcall(function() inst.Parent = nil end)
+            end
+        end
+
+        -- Particles (FFlagFixOutdatedParticles2 / deterministic particles)
+        if CONFIG.StripParticles then
+            if inst:IsA("ParticleEmitter") or inst:IsA("Fire")
+                or inst:IsA("Smoke") or inst:IsA("Sparkles") then
+                if savedFx[inst] == nil then savedFx[inst] = inst.Enabled end
+                pcall(function() inst.Enabled = false end)
+            end
+        end
+
+        -- Beams / trails / explosions
+        if CONFIG.StripBeamsTrails then
+            if inst:IsA("Beam") or inst:IsA("Trail") then
+                if savedFx[inst] == nil then savedFx[inst] = inst.Enabled end
+                pcall(function() inst.Enabled = false end)
+            elseif inst:IsA("Explosion") then
+                if savedFx[inst] == nil then savedFx[inst] = inst.Visible end
+                pcall(function() inst.Visible = false end)
+            end
+        end
+    end
+
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        pcall(process, inst)
+    end
+
+    local conn = Workspace.DescendantAdded:Connect(function(inst)
+        if State.enabled then pcall(process, inst) end
+    end)
+
+    return function()
+        conn:Disconnect()
+        for inst, v in pairs(savedParts) do
+            if typeof(inst) == "Instance" and inst.Parent then
+                pcall(function() inst.CastShadow = v end)
+            end
+        end
+        for inst, v in pairs(savedLights) do
+            if typeof(inst) == "Instance" and inst.Parent then
+                pcall(function() inst.Shadows = v end)
+            end
+        end
+        for inst, v in pairs(savedFx) do
+            if typeof(inst) == "Instance" and inst.Parent then
+                if inst:IsA("Explosion") then
+                    pcall(function() inst.Visible = v end)
+                else
+                    pcall(function() inst.Enabled = v end)
+                end
+            end
+        end
+        for inst, v in pairs(savedDecals) do
+            if typeof(inst) == "Instance" and inst.Parent then
+                pcall(function() inst.Transparency = v end)
+            end
+        end
+        for inst, parent in pairs(savedSurfaces) do
+            if typeof(inst) == "Instance" and parent then
+                pcall(function() inst.Parent = parent end)
+            end
+        end
+        for inst, v in pairs(savedMats) do
+            if typeof(inst) == "Instance" and inst.Parent then
+                pcall(function()
+                    inst.Material = v.material
+                    inst.Reflectance = v.reflectance
+                end)
+            end
+        end
+    end
+end
+
+-- Lighting: post-FX, atmosphere, clouds, sky + global lighting flattening.
+local function applyLightingFx()
+    local savedPost     = setmetatable({}, { __mode = "k" })
+    local savedAtmos    = {}   -- {instance, parent}
+    local savedClouds   = setmetatable({}, { __mode = "k" }) -- {enabled, cover}
+    local savedSky      = {}   -- {instance, parent}
+    local bloom         = nil
+    local bloomCreated  = false
+
+    local savedGlobals = {}
+    for _, prop in ipairs({
+        "GlobalShadows", "ShadowSoftness",
+        "EnvironmentDiffuseScale", "EnvironmentSpecularScale",
+    }) do
+        local ok, value = pcall(function() return Lighting[prop] end)
+        if ok then savedGlobals[prop] = value end
+    end
+
+    local function killPostFx(inst)
+        if not inst:IsA("PostEffect") then return end
+        if savedPost[inst] == nil then savedPost[inst] = inst.Enabled end
+        pcall(function() inst.Enabled = false end)
+    end
+
+    local function process(inst)
+        if CONFIG.DisablePostFX and inst:IsA("PostEffect") then
+            killPostFx(inst)
+        elseif CONFIG.DisableAtmosphere and inst:IsA("Atmosphere") then
+            savedAtmos[#savedAtmos + 1] = { inst, inst.Parent }
+            pcall(function() inst.Parent = nil end)
+        elseif CONFIG.DisableClouds and inst:IsA("Clouds") then
+            if savedClouds[inst] == nil then
+                local info = {}
+                pcall(function() info.enabled = inst.Enabled end)
+                pcall(function() info.cover = inst.Cover end)
+                savedClouds[inst] = info
+            end
+            pcall(function() inst.Enabled = false end)
+            pcall(function() inst.Cover = 0 end)
+        elseif CONFIG.DisableSky and inst:IsA("Sky") then
+            savedSky[#savedSky + 1] = { inst, inst.Parent }
+            pcall(function() inst.Parent = nil end)
+        end
+    end
+
+    if CONFIG.FlattenLighting then
+        pcall(function()
+            Lighting.ShadowSoftness = 0
+            Lighting.EnvironmentDiffuseScale = 0
+            Lighting.EnvironmentSpecularScale = 0
+        end)
+    end
+
+    for _, inst in ipairs(Lighting:GetDescendants()) do
+        pcall(process, inst)
+    end
+
+    -- Optional Bloom, mirroring the original script's look.
+    if CONFIG.EnableBloom then
+        bloom = Lighting:FindFirstChildOfClass("BloomEffect")
+        if not bloom then
+            bloom = Instance.new("BloomEffect")
+            bloom.Name = "SyntraBloom"
+            bloomCreated = true
+            bloom.Parent = Lighting
+        end
+        pcall(function()
+            bloom.Enabled = true
+            bloom.Intensity = 1.5
+            bloom.Size = 24
+            bloom.Threshold = 0.8
+        end)
+    end
+
+    local conn = Lighting.DescendantAdded:Connect(function(inst)
+        if State.enabled then pcall(process, inst) end
+    end)
+
+    return function()
+        conn:Disconnect()
+
+        for inst, v in pairs(savedPost) do
+            if typeof(inst) == "Instance" and inst.Parent then
+                pcall(function() inst.Enabled = v end)
+            end
+        end
+        for _, entry in ipairs(savedAtmos) do
+            if entry[1] then pcall(function() entry[1].Parent = entry[2] end) end
+        end
+        for inst, v in pairs(savedClouds) do
+            if typeof(inst) == "Instance" and inst.Parent then
+                if v.enabled ~= nil then
+                    pcall(function() inst.Enabled = v.enabled end)
+                end
+                if v.cover ~= nil then
+                    pcall(function() inst.Cover = v.cover end)
+                end
+            end
+        end
+        for _, entry in ipairs(savedSky) do
+            if entry[1] then pcall(function() entry[1].Parent = entry[2] end) end
+        end
+
+        if bloomCreated and bloom and bloom.Parent then
+            bloom:Destroy()
+        end
+
+        for k, v in pairs(savedGlobals) do
+            pcall(function() Lighting[k] = v end)
+        end
+    end
+end
+
+-- Terrain water calm + global wind calm.
+local function applyTerrain()
+    local terrain = Workspace:FindFirstChildOfClass("Terrain")
+    if not terrain then return nil end
+
+    local saved = {}
+    if CONFIG.CalmWater then
+        pcall(function() saved.WaterWaveSize = terrain.WaterWaveSize end)
+        pcall(function() saved.WaterWaveSpeed = terrain.WaterWaveSpeed end)
+        pcall(function()
+            terrain.WaterWaveSize = 0
+            terrain.WaterWaveSpeed = 0
+        end)
+    end
+
+    local savedWind
+    if CONFIG.CalmWind then
+        local ok, wind = pcall(function() return Workspace.GlobalWind end)
+        if ok then savedWind = wind end
+        pcall(function() Workspace.GlobalWind = Vector3.zero end)
+    end
+
+    return function()
+        if CONFIG.CalmWater then
+            if saved.WaterWaveSize ~= nil then
+                pcall(function() terrain.WaterWaveSize = saved.WaterWaveSize end)
+            end
+            if saved.WaterWaveSpeed ~= nil then
+                pcall(function() terrain.WaterWaveSpeed = saved.WaterWaveSpeed end)
+            end
+        end
+        if CONFIG.CalmWind and savedWind then
+            pcall(function() Workspace.GlobalWind = savedWind end)
+        end
+    end
+end
+
+-- ============================= FPS OVERLAY ===============================
+local function resolveGuiParent()
+    if gethui then
+        local ok, parent = pcall(gethui)
+        if ok and parent then return parent end
+    end
+    if localPlayer then
+        local ok2, pg = pcall(function() return localPlayer:WaitForChild("PlayerGui", 5) end)
+        if ok2 and pg then return pg end
+    end
+    local ok, core = pcall(function() return game:GetService("CoreGui") end)
+    if ok and core then return core end
+    return nil
+end
+
+local function buildOverlay()
+    local parent = resolveGuiParent()
+    if not parent then return nil, nil end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "SyntraHighFPS"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.DisplayOrder = 1000
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Panel"
+    frame.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+    frame.BackgroundTransparency = 0.35
+    frame.BorderSizePixel = 0
+    frame.Position = UDim2.new(0, 12, 0, 12)
+    frame.Size = UDim2.fromOffset(170, 74)
+    frame.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(0, 200, 140)
+    stroke.Transparency = 0.4
+    stroke.Parent = frame
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Stats"
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.fromScale(1, 1)
+    label.Font = Enum.Font.Code
+    label.TextSize = 14
+    label.TextColor3 = Color3.fromRGB(0, 230, 160)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Top
+    label.Padding = UDim.new(0, 4)
+    label.Text = "FPS: --"
+    label.Parent = frame
+
+    gui.Parent = parent
+
+    local frames, acc = 0, 0
+    local conn
+    conn = RunService.RenderStepped:Connect(function(dt)
+        frames = frames + 1
+        acc = acc + dt
+        if acc >= 0.5 then
+            local fps = frames / acc
+            frames, acc = 0, 0
+
+            local ping = "--"
+            pcall(function()
+                local item = Stats.Network.ServerStatsItem["Data Ping"]
+                if item then ping = string.format("%d", item:GetValue()) end
+            end)
+
+            local mem = "--"
+            pcall(function()
+                mem = string.format("%d", Stats:GetTotalMemoryUsageMb())
+            end)
+
+            label.Text = string.format("FPS: %d\nPing: %s ms\nMem: %s MB", fps, ping, mem)
+        end
+    end)
+
+    return gui, conn
+end
+
+-- ============================== ENABLE / DISABLE =========================
+local enable, disable
+
+-- Run a script-level layer without ever letting one failure abort enable().
+local function runLayer(fn)
+    local ok, restore = pcall(fn)
+    if ok then
+        pushRestore(restore)
+    else
+        log("optimization layer skipped:", tostring(restore))
+    end
+end
+
+enable = function()
+    if State.enabled then return end
+    State.enabled = true
+
+    -- 1. Real FFlags + FPS cap -------------------------------------------
+    local applied, failed = applyRealFlags()
+    if setfflag then
+        log(string.format("Real FFlags applied: %d | failed/skipped: %d", applied, failed))
+    end
+    applyFpsCap()
+
+    -- 2. Script-level FFlag-like layer -----------------------------------
+    if CONFIG.DisablePostFX or CONFIG.DisableAtmosphere or CONFIG.DisableClouds
+        or CONFIG.DisableSky or CONFIG.FlattenLighting then
+        runLayer(applyLightingFx)
+    end
+    if CONFIG.DisableShadows or CONFIG.ReduceDecals or CONFIG.FlattenMaterials
+        or CONFIG.StripParticles or CONFIG.StripBeamsTrails then
+        runLayer(applyWorld)
+    end
+    if CONFIG.CalmWater or CONFIG.CalmWind then
+        runLayer(applyTerrain)
+    end
+
+    -- 3. Overlay ----------------------------------------------------------
+    if CONFIG.ShowFPS then
+        local ok, gui, conn = pcall(buildOverlay)
+        if ok then
+            State.overlay = gui
+            State.overlayConn = conn
+        else
+            log("FPS overlay unavailable in this context; skipping.")
+        end
+    end
+
+    log("High-FPS mode ENABLED.")
+end
+
+disable = function()
+    if not State.enabled then return end
+    State.enabled = false
+
+    for i = #State.restores, 1, -1 do
+        pcall(State.restores[i])
+    end
+    State.restores = {}
+
+    if State.overlayConn then
+        pcall(function() State.overlayConn:Disconnect() end)
+        State.overlayConn = nil
+    end
+    if State.overlay then
+        pcall(function() State.overlay:Destroy() end)
+        State.overlay = nil
+    end
+
+    restoreRealFlags()
+    restoreFpsCap()
+
+    log("High-FPS mode DISABLED. Original settings restored.")
+end
+
+-- ================================ PUBLIC API =============================
+local API = {}
+function API.Enable()    enable()  end
+function API.Disable()   disable() end
+function API.Set(on)     if on then enable() else disable() end end
+function API.Toggle()    if State.enabled then disable() else enable() end end
+function API.IsEnabled() return State.enabled end
+function API.Status()
+    return {
+        enabled       = State.enabled,
+        realFlagsUsed = setfflag ~= nil,
+        flagCount     = #FLAGS,
+    }
+end
+
+local expose = getExecutorEnv()
+expose.SyntraHighFPS = API
+expose.SyntraAntiLag = API
+
+-- Optional hotkey.
+if CONFIG.ToggleKey then
+    UIS.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == CONFIG.ToggleKey then
+            API.Toggle()
+        end
+    end)
+end
+
+if CONFIG.AutoApply then
+    task.spawn(enable)
+end
+
+return API
